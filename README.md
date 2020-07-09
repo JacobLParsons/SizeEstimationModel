@@ -25,35 +25,47 @@ chain$"alpha0"[k/thin] = current$"alpha0"
 A list of interesting parameters (order of dimensions is always (sample number,site, sub-population, year) with irrelevant dimensions left out:
 
 Beta Hyper parameters for distribution of target population prevalence in initial year:
+
 "alpha0"  (Dimension: Chain Length)
+
 "beta0"   (Dimension: Chain Length)
 
 Beta Hyper parameters for distribution of sub-population prevalence in initial year:
+
 "alpha" (Dimension: Chain Length x Number of Subgroups)
+
 "beta" (Dimension: Chain Length x Number of Subgroups)
 
 Prevalence of target population:
+
 "pi" (Dimension: Chain Length x Number of Sites x Number of Years)
 
 Size of target population:
+
 "N" (Dimension: Chain Length x Number of Sites x Number of Years)
 
 Prevalence of subgroups:
+
 "p" (Dimension: Chain Length x Number of Sites x Number of Subgroups x Number of Years)
 
 Average Network Scale up bias (Log Scale):
+
 "mu" (Dimension: Chain Length)
 
 Average Multiplier Proportion Estimate Bias (Logit Scale):
+
 "theta"(Dimension: Chain Length)
 
 Sub-group specific Proportion Estimate Bias (Logit Scale):
+
 "gamma" (Dimension: Chain Length x Number of Subgroups)
 
 Site specific Proportion Estimate Bias (Logit Scale):
+
 "delta" (Dimension: Chain Length x Number of Sites)
 
 National level average shift in prevalence of target population (logit scale):
+
 "yearTrend" (Dimension: Chain Length x Number of Years)
 
 .............................................................
