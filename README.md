@@ -6,6 +6,8 @@ Files:
 MCMC.r - Contains the functions used to run the chain as well as a few utility functions for
 combining chains etc... The most useful file for implementing the function.
 
+confirmation.r - Tests to illustrate model capabilities and use in a portable manner. 
+
 MCMC.ro - Early draft of MCMC.r. Don't use this.
 
 Simulation.org - Contains simulations illustrating the use of MCMC.r and model test cases as code blocks. 
@@ -16,7 +18,7 @@ cross*.r Cross Validation Examples
 
 LoadData.r - Particular to the Ukraine Example
 
-Note: Scripts and files used to perform cross validation and the like are not in this release as they heavily rely on the PSU cluster's particular environment (and are implemented as shell scripts supplmented by a few R scripts rather than pure R code).
+Note: Several scripts and files heavily rely on PSU's cluster and its particular environment (including a few shell scripts). MCMC.r and Confirmation.r should be completely usable outside this environment and allow for applying our model to other problems. 
 
 .............................................................
 
