@@ -114,8 +114,6 @@
 
 * Drift Simulations
 #+BEGIN_SRC R :tangle drift.r
-
-  setwd("/storage/work/j/jlp592/UkraineWithYearEffect")
   
   args <- commandArgs(trailingOnly = TRUE)
   drift = as.numeric(args[1])
@@ -124,7 +122,7 @@
 
   source("LoadData.r")
   source("generateSyntheticData.r")
-  source("/storage/home/jlp592/work/RevisedUkraine/MCMC2.r")
+  source("MCMC2.r")
   
   length = N.MCMC
   thin = 50
@@ -220,8 +218,6 @@
 
 * Y Bias Simulations
 #+BEGIN_SRC R :tangle ybias.r
-
-  setwd("/storage/work/j/jlp592/UkraineWithYearEffect")
   
   args <- commandArgs(trailingOnly = TRUE)
   percentBias = as.numeric(args[1])
@@ -230,7 +226,7 @@
 
   source("LoadData.r")
   source("generateSyntheticData.r")
-  source("/storage/home/jlp592/work/RevisedUkraine/MCMC2.r")
+  source("MCMC.r")
 
   length = N.MCMC
   thin = 50
@@ -333,7 +329,7 @@
   #PBS -j oe
 
   date
-  Rscript "/storage/home/jlp592/work/UkraineWithYearEffect/drift.r" $DRIFT 5 5000
+  Rscript "./drift.r" $DRIFT 5 5000
   
 #+END_SRC
 
@@ -348,7 +344,7 @@
   #PBS -j oe
 
   date
-  Rscript "/storage/home/jlp592/work/UkraineWithYearEffect/ybias.r" $PBIAS 5 5000
+  Rscript "./ybias.r" $PBIAS 5 5000
   
 #+END_SRC
 
