@@ -12,6 +12,8 @@ Simulation.org - Contains simulations illustrating the use of MCMC.r and model t
 
 example.r - Contains an example use of the MCMC.r set of functions and illustrates how model fitting was done.
 
+cross*.r Cross Validation Examples
+
 LoadData.r - Particular to the Ukraine Example
 
 Note: Scripts and files used to perform cross validation and the like are not in this release as they heavily rely on the PSU cluster's particular environment (and are implemented as shell scripts supplmented by a few R scripts rather than pure R code).
