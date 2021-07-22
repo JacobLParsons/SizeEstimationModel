@@ -1,0 +1,3341 @@
+* MCMC Algorithm
+
+#+BEGIN_SRC R
+  
+  library(truncnorm)
+  library(LaplacesDemon)
+  library(abind)
+
+  chainBind = function(chainA, chainB)
+  {
+
+      
+      chain = list("mu0" = abind(chainA$mu0, chainB$mu0, along = 1),
+                   "sigmaSq0" = abind(chainA$sigmaSq0, chainB$sigmaSq0, along = 1),
+                   "pi" = abind(chainA$pi, chainB$pi, along = 1),
+                   "sigmaPiSq" = abind(chainA$sigmaPiSq, chainB$sigmaPiSq, along = 1),
+                   "N" =abind(chainA$N, chainB$N, along = 1),
+                   "p" = abind(chainA$p, chainB$p, along = 1),
+                   "sigmaNSq" = abind(chainA$sigmaNSq, chainB$sigmaNSq, along = 1),
+                   "sigmaGammaSq" = abind(chainA$sigmaGammaSq, chainB$sigmaGammaSq, along = 1),
+                   "sigmaDeltaSq" = abind(chainA$sigmaDeltaSq, chainB$sigmaDeltaSq, along = 1),
+                   "sigmaESq" = abind(chainA$sigmaESq, chainB$sigmaESq, along = 1),
+                   "sigmaSSq" = abind(chainA$sigmaSSq, chainB$sigmaSSq, along = 1),
+                   "mu" = abind(chainA$mu, chainB$mu, along = 1),
+                   "theta" = abind(chainA$theta, chainB$theta, along = 1),      
+                   "gamma" = abind(chainA$gamma, chainB$gamma, along = 1),
+                   "delta" = abind(chainA$delta, chainB$delta, along = 1),
+                   "yearTrend" = abind(chainA$yearTrend, chainB$yearTrend, along = 1),
+                   "sigmaSq.yearTrend" = abind(chainA$"sigmaSq.yearTrend", chainB$"sigmaSq.yearTrend", along = 1)
+                   )
+
+      return(chain)    
+  }
+  
+  
+  updateYearTrend = function(data, current)
+  {
+      yearTrend = current$yearTrend
+      
+      steps = logit(current$pi[,-1]) - logit(current$pi[,-data$numYears])
+      for(t in 2:numYears)
+      {
+          var = 1/(1/(current$sigmaSq.yearTrend) + numSites/current$sigmaPiSq )
+          coef = sum(steps[,t-1] )/current$sigmaPiSq
+          
+          yearTrend[t] = rnorm(n = 1, mean = var*coef, sd = sqrt(var)) #0
+      }
+      
+      return(yearTrend)
+  }
+
+  makeChain = function(data, length)
+  {
+      numSites = length(data$R[,1])
+      numLists = length(data$phat[1,,1])
+      numYears = length(data$R[1,])
+      
+      chain = list("mu0" = rep(NaN, length),
+                   "sigmaSq0" = rep(NaN, length),
+                   "pi" = array(NaN, dim = c(length, numSites, numYears)),
+                   "sigmaPiSq" = rep(NaN, length),             
+                   "N" = array(NaN, dim = c(length, numSites, numYears)),
+                   "p" = array(NaN, dim = c(length, numSites, numLists, numYears)),
+                   "sigmaNSq" = array(NaN, dim = c(length, numSites, numYears)),
+                   "sigmaGammaSq" = rep(NaN, length),
+                   "sigmaDeltaSq" = rep(NaN, length),
+                   "sigmaSSq" = rep(NaN, length),
+                   "sigmaESq" = rep(NaN, length),
+                   "mu" = rep(NaN, length),
+                   "theta" = rep(NaN, length),
+                   "gamma" = matrix(NaN, nrow = length, ncol = numLists),
+                   "delta" = matrix(NaN, nrow = length, ncol = numSites),
+                   "yearTrend" = matrix(NaN, nrow = length, ncol = numYears),
+                   "sigmaSq.yearTrend" = rep(NaN, length)
+                   )
+
+      return(chain)
+  }
+
+  initialize = function(data)
+  {
+      numSites = length(data$R[,1])
+      numLists = length(data$phat[1,,1])
+      numYears = length(data$R[1,])
+
+      
+      current = list("mu0" = 0,
+                     "sigmaSq0" = 1,
+                     "pi" = array(.3, dim = c(numSites, numYears)),
+                     "sigmaPiSq" = 1,             
+                     "N" = array(100000, dim = c(numSites, numYears) ),
+                     "p" = array(.5, dim = c(numSites, numLists, numYears)),
+                     "sigmaNSq" = array(20000, dim = c(numSites, numYears)),
+                     "sigmaGammaSq" = 1,
+                     "sigmaDeltaSq" = 1,
+                     "sigmaSSq" = 1,
+                     "sigmaESq" = 1,
+                     "mu" = 0,
+                     "theta" = 0,
+                     "gamma" = rep(0, numLists), 
+                     "delta" = rep(0, numSites),
+                     "yearTrend" = rep(0, numYears),
+                     "sigmaSq.yearTrend" = 0
+                     )
+
+      return(current)
+  }
+
+  logit = function(input)
+  {
+      return( log(input / (1 - input) ) )
+  }
+
+
+  invlogit = function(x)
+  {
+      return( 1 / (1 + exp(-x)) )
+  }
+
+  
+  updateSigmaPiSq = function(current, data)
+  {
+      yearTrend = current$yearTrend
+      numLists = data$numLists
+      numSites = data$numSites
+      numYears = data$numYears
+      
+      steps = logit(current$pi[,-1]) - logit(current$pi[,-numYears]) - matrix(yearTrend[-1], nrow = numSites, ncol = numYears-1, byrow = TRUE)
+      
+      sigmaPiSq = 1/rgamma(n=1, shape = 1 + length(steps)/2 , rate = .001 + sum ( (steps)^2 )/2 )
+
+      return(sigmaPiSq)
+  }
+
+  
+  updatePiN = function(current, data,tune)
+  {
+      numSites = length(data$R[,1])
+      numLists = length(data$phat[1,,1])
+      numYears = length(data$R[1,])
+
+      yearTrend = current$yearTrend
+
+      Nnew = current$N
+      pinew = current$pi
+
+      ## When do we have no data?
+      Ypresent = apply(!is.na(data$Y), MARGIN = c(1,3), FUN = max)
+      NSUpresent = !is.na(data$NSU)
+
+      ##Four Cases
+      NoData = !Ypresent & !NSUpresent
+      OnlyY = Ypresent & !NSUpresent
+      OnlyNSU = !Ypresent & NSUpresent
+      Both = Ypresent & NSUpresent
+
+      ## Generate Proposal Value
+      piprev = current$pi
+      Nprev = current$pi*data$R
+      logitpiprev = logit(piprev)
+
+      logitpiprop = logitpiprev + rnorm(length(piprev), mean = 0, sd = tune)
+      piprop = invlogit(logitpiprop)        
+      Nprop = piprop*data$R
+      
+      ## Update First Year
+      year = 1
+
+      part1 = dnorm(log(data$NSU[,year]), mean = log(Nprop[,year]) + current$mu, sd = sqrt(data$R[,year] / (data$D[,year] * Nprop[,year] )), log = TRUE)
+      part1[is.na(part1)] = 0
+
+      part2 = rowSums(dnorm(log(data$Y[,,year]/data$phat[,,year]), mean = matrix(log(Nprop[,year]) + current$theta, nrow = numSites, ncol = numLists) +
+                                                                       matrix(current$delta, nrow = numSites, ncol = numLists ) +
+                                                                       matrix(current$gamma, nrow = numSites, ncol = numLists, byrow = TRUE),
+                            sd = sqrt(current$sigmaESq/data$n[,,year]), log = TRUE), na.rm = TRUE)
+      part2[is.na(part2)] = 0
+      
+      logTopPost = dnorm(logit(piprop[,year]), current$mu0, sqrt(current$sigmaSq0), log = TRUE) + #dbeta(piprop[,year], shape1 = current$alpha0, shape2 = current$beta0, log = TRUE) +
+          part1 +
+          part2 +
+          dnorm(logit(current$pi[,year+1]), mean = logitpiprop[,year] + yearTrend[year+1], sd = sqrt(current$sigmaPiSq), log = TRUE)
+
+      part1 = dnorm(log(data$NSU[,year]), mean = log(Nprev[,year]) + current$mu, sd = sqrt(data$R[,year] / (data$D[,year] * Nprev[,year] )), log = TRUE)
+      part1[is.na(part1)] = 0
+
+      part2 = rowSums(dnorm(log(data$Y[,,year]/data$phat[,,year]), mean = matrix(log(Nprev[,year]) + current$theta, nrow = numSites, ncol = numLists) +
+                                                                       matrix(current$delta, nrow = numSites, ncol = numLists ) +
+                                                                       matrix(current$gamma, nrow = numSites, ncol = numLists, byrow = TRUE),
+                            sd = sqrt(current$sigmaESq/data$n[,,year]), log = TRUE), na.rm = TRUE)
+      part2[is.na(part2)] = 0
+
+
+      logBottomPost = dnorm(logit(piprev[,year]), current$mu0, sqrt(current$sigmaSq0), log = TRUE) + #dbeta(piprev[,year], shape1 = current$alpha0, shape2 = current$beta0, log = TRUE) +
+          part1 +
+          part2 +
+          dnorm(logit(current$pi[,year+1]), mean = logitpiprev[,year] + yearTrend[year+1], sd = sqrt(current$sigmaPiSq), log = TRUE)
+
+
+      ## Calculate Acceptance Probability
+      prob = exp( logTopPost - logBottomPost)
+
+      ## Accept/Reject
+      U = runif(length(prob))
+
+      pinew[which(U < prob),year] = piprop[which(U < prob),year]
+      pinew[which(U >= prob),year] = piprev[which(U >= prob),year]
+
+      Nnew[which(U < prob),year] = Nprop[which(U < prob),year]
+      Nnew[which(U >= prob),year] = Nprev[which(U >= prob),year]
+
+      
+      ## Update Interior Years Prevalence
+      for(year in 2:(numYears-1) )
+      {
+          part1 = dnorm(log(data$NSU[,year]), mean = log(Nprop[,year]) + current$mu, sd = sqrt(data$R[,year] / (data$D[,year] * Nprop[,year] )), log = TRUE)
+          part1[is.na(part1)] = 0
+
+          part2 = rowSums(dnorm(log(data$Y[,,year]/data$phat[,,year]), mean = matrix(log(Nprop[,year]) + current$theta, nrow = numSites, ncol = numLists) +
+                                                                           matrix(current$delta, nrow = numSites, ncol = numLists ) +
+                                                                           matrix(current$gamma, nrow = numSites, ncol = numLists, byrow = TRUE),
+                                sd = sqrt(current$sigmaESq/data$n[,,year]), log = TRUE), na.rm = TRUE)
+          part2[is.na(part2)] = 0
+
+          logTopPost = part1 +
+              part2 +
+              dnorm(logit(current$pi[,year+1]), mean = logitpiprop[,year] + yearTrend[year+1], sd = sqrt(current$sigmaPiSq), log = TRUE) +
+              dnorm(logitpiprop[,year], mean = logit(pinew[,year-1]) + yearTrend[year], sd = sqrt(current$sigmaPiSq), log = TRUE)
+          
+          part1 = dnorm(log(data$NSU[,year]), mean = log(Nprev[,year]) + current$mu, sd = sqrt(data$R[,year] / (data$D[,year] * Nprev[,year] )), log = TRUE)
+          part1[is.na(part1)] = 0
+
+          part2 = rowSums(dnorm(log(data$Y[,,year]/data$phat[,,year]), mean = matrix(log(Nprev[,year]) + current$theta, nrow = numSites, ncol = numLists) +
+                                                                           matrix(current$delta, nrow = numSites, ncol = numLists ) +
+                                                                           matrix(current$gamma, nrow = numSites, ncol = numLists, byrow = TRUE),
+                                sd = sqrt(current$sigmaESq/data$n[,,year]), log = TRUE), na.rm = TRUE)
+          part2[is.na(part2)] = 0
+
+          
+          logBottomPost = part1 +
+              part2 +
+              dnorm(logit(current$pi[,year+1]), mean = logitpiprev[,year] + yearTrend[year+1], sd = sqrt(current$sigmaPiSq), log = TRUE) +
+              dnorm(logitpiprev[,year], mean = logit(pinew[,year-1]) + yearTrend[year], sd = sqrt(current$sigmaPiSq), log = TRUE)
+
+          ## Calculate Acceptance Probability
+          prob = exp( logTopPost - logBottomPost)
+
+          ## Accept/Reject
+          U = runif(length(prob))
+
+          pinew[which(U < prob),year] = piprop[which(U < prob),year]
+          pinew[which(U >= prob),year] = piprev[which(U >= prob),year]
+
+          Nnew[which(U < prob),year] = Nprop[which(U < prob)]
+          Nnew[which(U >= prob),year] = Nprev[which(U >= prob)]
+          
+      }
+      
+      ## Update Last Pi
+      year = numYears
+
+      part1 = dnorm(log(data$NSU[,year]), mean = log(Nprop[,year]) + current$mu, sd = sqrt(data$R[,year] / (data$D[,year] * Nprop[,year] )), log = TRUE)
+      part1[is.na(part1)] = 0
+
+      part2 = rowSums(dnorm(log(data$Y[,,year]/data$phat[,,year]), mean = matrix(log(Nprop[,year]) + current$theta, nrow = numSites, ncol = numLists) +
+                                                                       matrix(current$delta, nrow = numSites, ncol = numLists ) +
+                                                                       matrix(current$gamma, nrow = numSites, ncol = numLists, byrow = TRUE),
+                            sd = sqrt(current$sigmaESq/data$n[,,year]), log = TRUE), na.rm = TRUE)
+      part2[is.na(part2)] = 0
+      
+      logTopPost = part1 +
+          part2 +
+          dnorm(logitpiprop[,year], mean = logit(pinew[,year-1]) + yearTrend[year], sd = sqrt(current$sigmaPiSq), log = TRUE)
+
+      
+      part1 = dnorm(log(data$NSU[,year]), mean = log(Nprev[,year]) + current$mu, sd = sqrt(data$R[,year] / (data$D[,year] * Nprev[,year] )), log = TRUE)
+      part1[is.na(part1)] = 0
+
+      part2 = rowSums(dnorm(log(data$Y[,,year]/data$phat[,,year]), mean = matrix(log(Nprev[,year]) + current$theta, nrow = numSites, ncol = numLists) +
+                                                                       matrix(current$delta, nrow = numSites, ncol = numLists ) +
+                                                                       matrix(current$gamma, nrow = numSites, ncol = numLists, byrow = TRUE),
+                            sd = sqrt(current$sigmaESq/data$n[,,year]), log = TRUE), na.rm = TRUE)
+      part2[is.na(part2)] = 0
+
+      
+      logBottomPost = part1 +
+          part2 +
+          dnorm(logitpiprev[,year], mean = logit(pinew[,year-1]) + yearTrend[year], sd = sqrt(current$sigmaPiSq), log = TRUE)
+
+      ## Calculate Acceptance Probability
+      prob = exp(logTopPost - logBottomPost)
+
+      ## Accept/Reject
+      U = runif(length(prob))
+
+      pinew[which(U < prob),year] = piprop[which(U < prob),year]
+      pinew[which(U >= prob),year] = piprev[which(U >= prob),year]
+
+      Nnew[which(U < prob),year] = Nprop[which(U < prob),year]
+      Nnew[which(U >= prob),year] = Nprev[which(U >= prob),year]
+
+      pinew[pinew == 1] = .99
+      
+      return(pinew)
+  }
+
+
+  updateMCMC = function(current, N.MCMC, data, tune)
+  {
+      chain = makeChain(data, N.MCMC )
+      
+      for(i in 1:N.MCMC)
+      {
+          current$N = current$pi*data$R
+          ## Update p
+          for(list in 1:numLists)
+          {
+              current$p[,list,] = data$Y[,list,]/current$N
+          }
+
+          ## Update mu0
+          var =  1/( (1/10) + length(current$pi[,1])/current$sigmaSq0)
+          coef = sum(logit(current$pi[,1]) )/current$sigmaSq0
+
+          current$mu0 = rnorm(1, mean = coef*var, sd = sqrt(var))
+          chain$mu0[i] = current$mu0
+
+          ## Update sigmaSq0
+          current$sigmaSq0 = 1/rgamma(n=1, shape = 1 + length(current$pi[,1])/2 , rate = 1 + sum( (logit(current$pi[,1]) - current$mu0)^2 )/2 )
+          chain$sigmaSq0[i] = current$sigmaSq0
+
+          ## Update pi
+          current$pi = updatePiN(current, data, tune)                                                 
+          chain$pi[i,,] = current$pi
+          current$N = current$pi*data$R
+          chain$N[i,,] = current$N
+          
+          ## Update yearTrend
+          current$yearTrend = updateYearTrend(data,current )
+          chain$yearTrend[i,] = current$yearTrend
+
+          ## Update "sigmaSq.yearTrend"
+          current$"sigmaSq.yearTrend" = 1/rgamma(n=1, shape = 1 + length(current$yearTrend[-1])/2 , rate = .001 + sum ( (current$yearTrend[-1])^2 )/2 )
+          chain$sigmaSq.yearTrend[i] = current$"sigmaSq.yearTrend"
+
+          
+          ## Update sigmaPiSq       
+          current$"sigmaPiSq" = updateSigmaPiSq(current,data)
+          chain$sigmaPiSq[i] = current$"sigmaPiSq"
+          
+          
+          ## Update sigmaNSq 
+          current$"sigmaNSq" = data$R / (data$D * current$N )
+
+          ## Update p
+          for(list in 1:numLists)
+          {
+              current$p[,list,] = data$Y[,list,]/current$N
+          }
+          
+          ## Update theta
+          mean = log(current$p) - replicate(numYears,outer(current$delta, current$gamma, FUN=function(x,y) (x+y)))
+          Ypresent = !is.na(data$Y)
+          var = 1/(1/1 + sum(data$n[Ypresent])/current$sigmaESq )#1/(1/current$sigmaSSq + sum(data$n[Ypresent])/current$sigmaESq )
+          coef = sum(data$n[Ypresent]*(log(data$phat[Ypresent]) - mean[Ypresent]) )/current$sigmaESq
+
+          stepvar = var
+
+          NSUpresent = !is.na(data$NSU)
+          var = 1 / ( 1/stepvar + sum(1/(current$sigmaNSq[NSUpresent]) ) )
+          coef = coef + sum((log(data$NSU[NSUpresent]) - log(current$N[NSUpresent]) )/(current$sigmaNSq[NSUpresent] ) )
+          
+          current$"theta" = -rnorm(n = 1, mean = var*coef, sd = sqrt(var))
+          chain$theta[i] = current$theta
+          print(current$theta)
+
+          ## Update mu
+          current$"mu" = -current$theta
+          chain$mu[i] = current$mu
+
+          ## Update Gamma
+          mean = log(current$p) - current$theta - aperm(replicate(numLists,matrix(current$delta, nrow = numSites, ncol=numYears)), perm = c(1,3,2))
+          var = 1/( (1/current$sigmaGammaSq) + rowSums(colSums(data$n, na.rm = TRUE))/current$sigmaESq)
+          coef = rowSums(colSums(data$n*(log(data$phat) - mean), na.rm = TRUE ))/current$sigmaESq
+
+          current$"gamma" = -rnorm(length(current$"gamma"), mean = coef*var, sd = sqrt(var))
+          chain$gamma[i,] = current$gamma
+
+          ## Update Delta
+          mean = log(current$p) - current$theta - replicate(numYears,t(replicate(numSites,current$gamma)))
+          var =  1/( (1/current$sigmaDeltaSq) + apply(data$n, MARGIN = 1, FUN = sum, na.rm = TRUE)/current$sigmaESq)
+          coef = rowSums(data$n*(log(data$phat) - mean), na.rm = TRUE )/current$sigmaESq
+
+          current$"delta" = -rnorm(numSites, mean = coef*var, sd = sqrt(var))
+          chain$delta[i,] = current$delta
+
+          ## Update SigmaDeltaSq
+          current$sigmaDeltaSq = 1/rgamma(n=1, shape = 1 + length(current$delta)/2 , rate = .001 + sum ( (current$delta)^2 )/2 )
+          chain$sigmaDeltaSq[i] = current$sigmaDeltaSq
+
+          ## Update SigmaSSq
+          current$sigmaSSq = 1#/rgamma(n=1, shape = 1 , rate = .001 + (current$theta^2 + current$mu^2 )/2 )
+          chain$sigmaSSq[i] = current$sigmaSSq
+
+          ## Update SigmaGammaSq
+          current$sigmaGammaSq = 1/rgamma(n=1, shape = 1 + length(current$gamma)/2 , rate = .001 + sum ( (current$gamma)^2 )/2 )
+          chain$sigmaGammaSq[i] = current$sigmaGammaSq
+
+          ## Update SigmaEqS
+          mean = log(current$p) - current$theta - replicate(numYears,outer(current$delta, current$gamma, FUN=function(x,y) (x+y)))
+          current$sigmaESq = 1/rgamma(n=1, shape = 1 + sum(!is.na(data$phat))/2 , rate = .001 + sum ( data$n*( log(data$phat) - mean)^2 , na.rm=TRUE)/2 )
+          chain$sigmaESq[i] = current$sigmaESq
+
+      }
+
+      return(list("chain" = chain, "current" = current))
+
+  }
+
+  runMCMC = function(data, current , tune, N.MCMC, thin, burnin)
+  {
+      data$Y[is.na(data$phat)] = NA
+      data$n[is.na(data$phat)] = NA
+      
+      chain = makeChain(data, N.MCMC )
+
+      results = updateMCMC(current, burnin, data,  tune)    
+      current = results$current
+      
+      for(i in 1:N.MCMC){          
+          results = updateMCMC(current, thin, data,  tune)
+          
+          current = results$current
+          
+          chain$"mu0"[i] = current$mu0
+          chain$"sigmaSq0"[i] = current$sigmaSq0
+          chain$"pi"[i,,] = current$pi
+          chain$"sigmaPiSq"[i] = current$sigmaPiSq
+          chain$"yearTrend"[i,] = current$yearTrend
+          chain$"sigmaSq.yearTrend"[i] = current$sigmaSq.yearTrend
+          chain$"sigmaNSq"[i,,] = current$sigmaNSq
+          chain$"mu"[i] = current$mu
+          chain$"p"[i,,,] = current$p
+          chain$"theta"[i] = current$theta
+          chain$"gamma"[i,] = current$gamma
+          chain$"delta"[i,] = current$delta
+          chain$"sigmaGammaSq"[i] = current$sigmaGammaSq
+          chain$"sigmaSSq"[i] = current$sigmaSSq
+          chain$"sigmaDeltaSq"[i] = current$sigmaDeltaSq
+          chain$"sigmaESq"[i] = current$sigmaESq
+          chain$"N"[i,,] = current$N
+          
+      }
+
+      return(list("chain" = chain, "current" = current ) )
+  }
+  
+  
+  
+#+END_SRC
+
+* Sim Functions
+
+#+BEGIN_SRC R
+
+  simFromPrior = function(data, alpha, beta, p = NULL)
+  {
+      numYears = data$numYears
+      numSites = data$numSites
+      numLists = data$numLists
+
+      R = data$R
+      n = data$n
+      D = data$D
+      Y = data$Y
+      
+      pi = matrix(NA, nrow = numSites, ncol = numYears )      
+      N = matrix(NA, nrow = numSites, ncol = numYears )
+      NSU = matrix(NA, nrow = numSites, ncol = numYears )
+      Y = array(NA, dim = c(numSites, numLists, numYears))
+      phat = array(NA, dim = c(numSites, numLists, numYears))
+
+      sigmaSq0 = 1/rgamma(n=1, shape = 1, rate = .001 )
+      sigmaPiSq = 1/rgamma(n=1, shape = 1, rate = .001 )
+      sigmaSq.yearTrend = 1/rgamma(n=1, shape = 1, rate = .001 )
+      sigmaESq = 1/rgamma(n=1, shape = 1, rate = .001 )
+      SigmaDeltaSq = 1/rgamma(n=1, shape = 1, rate = .001 )
+      SigmaGammaSq = 1/rgamma(n=1, shape = 1, rate = .001 )
+      sigmaSSq = 1#/rgamma(n=1, shape = 1, rate = .001 )
+      
+      mu = rnorm(1, mean = 0, sd = sqrt(sigmaSSq) )
+      mu0 = rnorm(1, mean = 0, sd = sqrt(10) )
+      yearTrend = rnorm(numYears, 0, sqrt(sigmaSq.yearTrend) )
+      yearTrend[1] = 0
+ 
+      theta = -mu#rnorm(1, mean = 0, sd = sqrt(sigmaSSq) )
+      delta = rnorm(numSites,0, sqrt(SigmaDeltaSq) )
+      gamma = rnorm(numLists,0, sqrt(SigmaGammaSq) )
+      
+      pi[,1] = invlogit( rnorm(numSites, mu0, sqrt(sigmaSq0)) )
+      N[,1] = R[,1]*pi[,1]
+      NSU[,1] = exp(rnorm(numSites, log(N[,1]) + mu , sqrt(R[,1]/(N[,1]*D[,1]))  ))
+      
+      if(is.null(p))
+      {
+          p2 = array(NA, dim = c(numSites, numLists, numYears))
+      }
+      
+      for(list in 1:numLists )
+      {
+          if(is.null(p))
+          {
+              Y[,list,1] = data$Y[,list,1]
+              p2[,list,1] = data$Y[,list,1] / N[,1]
+              phat[,list,1] = exp(rnorm(numSites, log(p2[,list,1]) - theta - delta - gamma[list], sd = sqrt(sigmaESq/n[,list,1]  )  ))
+          }
+          else
+          {
+              Y[,list,1] = round(N[,1]*p[,list,1])
+              p[,list,1] = Y[,list,1] / N[,1]
+              phat[,list,1] = exp(rnorm(numSites, log(p[,list,1]) - theta - delta - gamma[list], sd = sqrt(sigmaESq/n[,list,1]  )  ))
+          }          
+          
+          
+      }
+      
+      for(year in 2:numYears)
+      {
+
+          pi[,year] = invlogit( rnorm(numSites , mean = logit(pi[,year - 1]) + yearTrend[year], sqrt(sigmaPiSq) )  )
+          N[,year] =  R[,year]*pi[,year]
+          NSU[,year] = exp(rnorm(numSites, log(N[,year]) + mu , sqrt(R[,year]/(N[,year]*D[,year]))  ))
+          
+          for(list in 1:numLists )
+          {
+              if(is.null(p))
+              {
+                  Y[,list,year] = data$Y[,list,year]
+                  p2[,list,year] = data$Y[,list,year] / N[,year]
+                  phat[,list,year] = exp(rnorm(numSites, log(p2[,list,year]) - theta - delta - gamma[list], sd = sqrt(sigmaESq/n[,list,year]  )  ))
+              }
+              else
+              {
+                  Y[,list,year] = round(N[,year]*p[,list,year])
+                  p[,list,year] = Y[,list,year] / N[,year]
+                  phat[,list,year] = exp(rnorm(numSites, log(p[,list,year]) - theta - delta - gamma[list], sd = sqrt(sigmaESq/n[,list,year]  )  ))
+              }          
+
+              
+          }
+      }
+
+      if(is.null(p))
+          p = p2
+      
+      parameters = list("mu0" = mu0,
+                        "sigmaSq0" = sigmaSq0,
+                        "pi" = pi,
+                        "sigmaPiSq" = sigmaPiSq,
+                        "yearTrend" = yearTrend,
+                        "sigmaSq.yearTrend" = sigmaSq.yearTrend,
+                        "sigmaNSq" = R/(N*D), # works
+                        "mu" = mu,
+                        "p" = p,
+                        "theta" = theta,
+                        "gamma" = gamma,
+                        "delta" = delta,
+                        "sigmaGammaSq" = SigmaGammaSq,
+                        "sigmaDeltaSq" = SigmaDeltaSq, #works
+                        "sigmaESq" = sigmaESq, #works
+                        "sigmaSSq" = sigmaSSq,
+                        "N" = N
+                        )
+
+      
+      data = list("R" = R,
+                  "Y" = Y,
+                  "phat" = phat,
+                  "NSU" = NSU,
+                  "D" = D,
+                  "n" = n,
+                  "numSites" = numSites,
+                  "numLists" = numLists,
+                  "numYears" = numYears
+                  )
+
+      return( list("data" = data, "parameters" = parameters) )
+
+  }
+
+  simFromParameters = function(data, parameters, p = NULL)
+  {
+      numYears = data$numYears
+      numSites = data$numSites
+      numLists = data$numLists
+
+      R = data$R
+      n = data$n
+      D = data$D
+      Y = data$Y
+      
+      pi = matrix(NA, nrow = numSites, ncol = numYears )      
+      N = matrix(NA, nrow = numSites, ncol = numYears )
+      NSU = matrix(NA, nrow = numSites, ncol = numYears )
+      Y = array(NA, dim = c(numSites, numLists, numYears))
+      phat = array(NA, dim = c(numSites, numLists, numYears))
+
+      sigmaPiSq = parameters$sigmaPiSq
+      sigmaSq.yearTrend = parameters$yearTrend
+      sigmaESq = parameters$sigmaESq
+      SigmaDeltaSq = parameters$sigmaDeltaSq
+      SigmaGammaSq = parameters$sigmaGammaSq
+      sigmaSSq = parameters$sigmaSSq
+      
+      mu = parameters$mu
+      yearTrend = parameters$yearTrend
+      yearTrend[1] = 0
+      
+      theta = parameters$theta
+      delta = parameters$delta
+      gamma = parameters$gamma
+      
+      pi = parameters$pi
+      N = R*pi
+      NSU[,1] = exp(rnorm(numSites, log(N[,1]) + mu , sqrt(R[,1]/(N[,1]*D[,1]))  ))
+      
+      if(is.null(p))
+      {
+          p2 = array(NA, dim = c(numSites, numLists, numYears))
+      }
+      
+      for(list in 1:numLists )
+      {
+          if(is.null(p))
+          {
+              Y[,list,1] = data$Y[,list,1]
+              p2[,list,1] = data$Y[,list,1] / N[,1]
+              phat[,list,1] = exp(rnorm(numSites, log(p2[,list,1]) - theta - delta - gamma[list], sd = sqrt(sigmaESq/n[,list,1]  )  ))
+          }
+          else
+          {
+              Y[,list,1] = round(N[,1]*p[,list,1])
+              p[,list,1] = Y[,list,1] / N[,1]
+              phat[,list,1] = exp(rnorm(numSites, log(p[,list,1]) - theta - delta - gamma[list], sd = sqrt(sigmaESq/n[,list,1]  )  ))
+          }          
+          
+          
+      }
+      
+      for(year in 2:numYears)
+      {
+
+          NSU[,year] = exp(rnorm(numSites, log(N[,year]) + mu , sqrt(R[,year]/(N[,year]*D[,year]))  ))
+          
+          for(list in 1:numLists )
+          {
+              if(is.null(p))
+              {
+                  Y[,list,year] = data$Y[,list,year]
+                  p2[,list,year] = data$Y[,list,year] / N[,year]
+                  phat[,list,year] = exp(rnorm(numSites, log(p2[,list,year]) - theta - delta - gamma[list], sd = sqrt(sigmaESq/n[,list,year]  )  ))
+              }
+              else
+              {
+                  Y[,list,year] = round(N[,year]*p[,list,year])
+                  p[,list,year] = Y[,list,year] / N[,year]
+                  phat[,list,year] = exp(rnorm(numSites, log(p[,list,year]) - theta - delta - gamma[list], sd = sqrt(sigmaESq/n[,list,year]  )  ))
+              }          
+
+              
+          }
+      }
+
+      if(is.null(p))
+          p = p2
+      
+      parameters = list("mu0" = parameters$mu0,
+                        "sigmaSq0" = parameters$sigmaSq0,
+                        "pi" = pi,
+                        "sigmaPiSq" = sigmaPiSq,
+                        "yearTrend" = yearTrend,
+                        "sigmaSq.yearTrend" = sigmaSq.yearTrend,
+                        "sigmaNSq" = R/(N*D), # works
+                        "mu" = mu,
+                        "p" = p,
+                        "theta" = theta,
+                        "gamma" = gamma,
+                        "delta" = delta,
+                        "sigmaGammaSq" = SigmaGammaSq,
+                        "sigmaDeltaSq" = SigmaDeltaSq, #works
+                        "sigmaESq" = sigmaESq, #works
+                        "sigmaSSq" = sigmaSSq,
+                        "N" = N
+                        )
+
+      
+      data = list("R" = R,
+                  "Y" = Y,
+                  "phat" = phat,
+                  "NSU" = NSU,
+                  "D" = D,
+                  "n" = n,
+                  "numSites" = numSites,
+                  "numLists" = numLists,
+                  "numYears" = numYears
+                  )
+
+      return( list("data" = data, "parameters" = parameters) )
+
+  }
+
+  simFromVarParameters = function(data, parameters, p = NULL)
+  {
+      numYears = data$numYears
+      numSites = data$numSites
+      numLists = data$numLists
+
+      R = data$R
+      n = data$n
+      D = data$D
+      Y = data$Y
+      
+      pi = matrix(NA, nrow = numSites, ncol = numYears )      
+      N = matrix(NA, nrow = numSites, ncol = numYears )
+      NSU = matrix(NA, nrow = numSites, ncol = numYears )
+      Y = array(NA, dim = c(numSites, numLists, numYears))
+      phat = array(NA, dim = c(numSites, numLists, numYears))
+
+      sigmaSq0 = parameters$sigmaSq0
+      sigmaPiSq = parameters$sigmaPiSq
+      sigmaSq.yearTrend = parameters$sigmaSq.yearTrend
+      sigmaESq = parameters$sigmaESq
+      SigmaDeltaSq = parameters$sigmaDeltaSq
+      SigmaGammaSq = parameters$sigmaGammaSq
+      sigmaSSq = parameters$sigmaSSq
+      
+      mu = rnorm(1, mean = 0, sd = sqrt(sigmaSSq) )
+      mu0 = rnorm(1, mean = 0, sd = sqrt(10) )
+      yearTrend = rnorm(numYears, 0, sqrt(sigmaSq.yearTrend) )
+      yearTrend[1] = 0
+ 
+      theta = -mu#rnorm(1, mean = 0, sd = sqrt(sigmaSSq) )      
+      delta = rnorm(numSites,0, sqrt(SigmaDeltaSq) )
+      gamma = rnorm(numLists,0, sqrt(SigmaGammaSq) )
+      
+      pi[,1] = invlogit(rnorm(numSites, mu0, sqrt(sigmaSq0)))
+      N[,1] = R[,1]*pi[,1]
+      NSU[,1] = exp(rnorm(numSites, log(N[,1]) + mu , sqrt(R[,1]/(N[,1]*D[,1]))  ))
+      
+      if(is.null(p))
+      {
+          p2 = array(NA, dim = c(numSites, numLists, numYears))
+      }
+      
+      for(list in 1:numLists )
+      {
+          if(is.null(p))
+          {
+              Y[,list,1] = data$Y[,list,1]
+              p2[,list,1] = data$Y[,list,1] / N[,1]
+              phat[,list,1] = exp(rnorm(numSites, log(p2[,list,1]) - theta - delta - gamma[list], sd = sqrt(sigmaESq/n[,list,1]  )  ))
+          }
+          else
+          {
+              Y[,list,1] = round(N[,1]*p[,list,1])
+              p[,list,1] = Y[,list,1] / N[,1]
+              phat[,list,1] = exp(rnorm(numSites, log(p[,list,1]) - theta - delta - gamma[list], sd = sqrt(sigmaESq/n[,list,1]  )  ))
+          }          
+          
+          
+      }
+      
+      for(year in 2:numYears)
+      {
+
+          pi[,year] = invlogit( rnorm(numSites , mean = logit(pi[,year - 1]) + yearTrend[year], sqrt(sigmaPiSq) )  )
+          N[,year] =  R[,year]*pi[,year]
+          NSU[,year] = exp(rnorm(numSites, log(N[,year]) + mu , sqrt(R[,year]/(N[,year]*D[,year]))  ))
+          
+          for(list in 1:numLists )
+          {
+              if(is.null(p))
+              {
+                  Y[,list,year] = data$Y[,list,year]
+                  p2[,list,year] = data$Y[,list,year] / N[,year]
+                  phat[,list,year] = exp(rnorm(numSites, log(p2[,list,year]) - theta - delta - gamma[list], sd = sqrt(sigmaESq/n[,list,year]  )  ))
+              }
+              else
+              {
+                  Y[,list,year] = round(N[,year]*p[,list,year])
+                  p[,list,year] = Y[,list,year] / N[,year]
+                  phat[,list,year] = exp(rnorm(numSites, log(p[,list,year]) - theta - delta - gamma[list], sd = sqrt(sigmaESq/n[,list,year]  )  ))
+              }          
+
+              
+          }
+      }
+
+      if(is.null(p))
+          p = p2
+      
+      parameters = list("mu0" = mu0,
+                        "sigmaSq0" = sigmaSq0,
+                        "pi" = pi,
+                        "sigmaPiSq" = sigmaPiSq,
+                        "yearTrend" = yearTrend,
+                        "sigmaSq.yearTrend" = sigmaSq.yearTrend,
+                        "sigmaNSq" = R/(N*D), # works
+                        "sigmaSSq" = sigmaSSq,
+                        "mu" = mu,
+                        "p" = p,
+                        "theta" = theta,
+                        "gamma" = gamma,
+                        "delta" = delta,
+                        "sigmaGammaSq" = SigmaGammaSq,
+                        "sigmaDeltaSq" = SigmaDeltaSq, #works
+                        "sigmaESq" = sigmaESq, #works
+                        "N" = N
+                        )
+
+      
+      data = list("R" = R,
+                  "Y" = Y,
+                  "phat" = phat,
+                  "NSU" = NSU,
+                  "D" = D,
+                  "n" = n,
+                  "numSites" = numSites,
+                  "numLists" = numLists,
+                  "numYears" = numYears
+                  )
+
+      return( list("data" = data, "parameters" = parameters) )
+
+  }
+
+
+  samplePosteriorPredicitve = function(data, chain)
+  {
+      N.MCMC = length(chain$theta)
+      
+      data.chain = list("R" = data$R,
+                        "Y" = data$Y,
+                        "phat" = array(NA, dim = c(N.MCMC, dim(data$phat))),
+                        "NSU" = array(NA, dim = c(N.MCMC, dim(data$NSU))),
+                        "D" = data$D,
+                        "n" = data$n,
+                        "numSites" = numSites,
+                        "numLists" = numLists,
+                        "numYears" = numYears
+                        )
+
+
+      for(i in 1:N.MCMC)
+      {
+
+          current  = list("mu0" = chain$mu0[i],
+                          "sigmaSq0" = chain$sigmaSq0[i],
+                          "pi" = chain$pi[i],
+                          "sigmaPiSq" = chain$sigmaPiSq[i],
+                          "yearTrend" = chain$yearTrend[i,],
+                          "sigmaSq.yearTrend" = chain$sigmaSq.yearTrend[i],
+                          "sigmaNSq" = data$R/(chain$N[i,,]*data$D), # works
+                          "mu" = chain$mu[i],
+                          "p" = chain$p[i,,,],
+                          "theta" = chain$theta[i],
+                          "gamma" = chain$gamma[i,],
+                          "delta" = chain$delta[i,],
+                          "sigmaGammaSq" = chain$sigmaGammaSq[i],
+                          "sigmaDeltaSq" = chain$sigmaDeltaSq[i], #works
+                          "sigmaSSq" = chain$sigmaSSq[i], #works
+                          "sigmaESq" = chain$sigmaESq[i], #works
+                          "N" = chain$N[i,,]
+                          )
+
+    
+          data.new = simFromParameters(data, current )$data
+
+          data.chain$phat[i,,,] = data.new$phat
+          data.chain$NSU[i,,] = data.new$NSU
+
+      }
+
+      return(data.chain)
+      
+  }
+
+  
+  predictNewSite = function(data, chain)
+  {
+      N.MCMC = length(chain$theta)
+      
+      data.chain = list("R" = data$R,
+                        "Y" = data$Y,
+                        "phat" = array(NA, dim = c(N.MCMC, dim(phat))),
+                        "NSU" = array(NA, dim = c(N.MCMC, dim(NSU))),
+                        "D" = data$D,
+                        "n" = data$n,
+                        "numSites" = numSites,
+                        "numLists" = numLists,
+                        "numYears" = numYears
+                        )
+
+
+      for(i in 1:N.MCMC)
+      {          
+
+          current  = list("mu0" = chain$mu0[i],
+                          "sigmaSq0" = chain$sigmaSq0[i],
+                          "pi" = chain$pi[i],
+                          "sigmaPiSq" = chain$sigmaPiSq[i],
+                          "yearTrend" = chain$yearTrend[i,],
+                          "sigmaSq.yearTrend" = chain$sigmaSq.yearTrend[i],
+                          "sigmaNSq" = data$R/(chain$N[i,,]*data$D), # works
+                          "mu" = chain$mu[i],
+                          "p" = chain$p[i,,,],
+                          "theta" = chain$theta[i],
+                          "gamma" = chain$gamma[i,],
+                          "delta" = chain$delta[i,],
+                          "sigmaGammaSq" = chain$sigmaGammaSq[i],
+                          "sigmaDeltaSq" = chain$sigmaDeltaSq[i], #works
+                          "sigmaESq" = chain$sigmaESq[i], #works
+                          "N" = chain$N[i,,]
+                          )
+
+          
+          data.new = simFromParameters(data,  current, )
+
+          data.chain$phat[i,,,] = data.new$phat
+          data.chain$NSU[i,,] = data.new$NSU
+
+      }
+
+      return(data.chain)
+      
+  }
+
+  
+#+END_SRC
+
+
+* Test Data selected from prior. 
+
+#+BEGIN_SRC R
+
+  ### Simulate Fake Data
+  numYears = 7
+  numSites = 27
+  numLists = 8
+
+  D = matrix(300, nrow = numSites, ncol = numYears )
+  
+  data = list("R" = matrix(1:numSites * 20000, nrow = numSites, ncol = numYears ),
+              "Y" = array(NA, dim = c(numSites,numLists, numYears)),
+              "phat" = array(NA, dim = c(numSites, numLists, numYears)),
+              "NSU" = matrix(NA, nrow = numSites, ncol = numYears ),
+              "D" = matrix(300, nrow = numSites, ncol = numYears ),
+              "n" = round(array(runif(numYears*numSites*numLists, min = 100, max = 500), dim = c(numSites, numLists, numYears))),
+              "numSites" = numSites,
+              "numLists" = numLists,
+              "numYears" = numYears
+              )
+
+  p = array(runif(numYears*numSites*numLists, max = .3, min = .0001 ), dim = c(numSites, numLists, numYears))
+
+  simulated = simFromPrior(data, 5,50, p)
+  parameters = simulated$parameters
+
+  ### Find a starting point for the chain using only the simulated data
+  simulated2 = simFromPrior(simulated$data, 5, 50)
+
+  ### Fit model
+  results = runMCMC(simulated$data, simulated2$parameters , .5, 1000, 1,1000 )
+  chain = results$chain
+  current = results$current
+
+  results = runMCMC(simulated$data, current , .2, 1000, 1000,1000 )
+  chain = results$chain
+  current = results$current
+
+  ### Compare Estimates to observations
+  ## pi
+  apply(chain$pi, FUN = mean, MARGIN = c(2,3), na.rm=TRUE)
+  parameters$pi
+  plot(logit(parameters$pi ),   apply(logit(chain$pi), FUN = mean, MARGIN = c(2,3), na.rm=TRUE))
+  abline(a=0,b=1)
+
+  ##Pop size
+  apply(chain$N, FUN = mean, MARGIN = c(2,3))
+  parameters$N
+  plot( apply(log(chain$N), FUN = mean, MARGIN = c(2,3)), log(parameters$N))
+  abline(a=0,b=1)
+  
+  ## First Year Priors
+  mean(chain$mu0)
+  mean(chain$sigmaSq0)
+  parameters$mu00 
+  parameters$sigmaSq0
+
+  ##Year Trend
+  parameters$yearTrend
+  colMeans(chain$yearTrend,na.rm = TRUE)
+  plot(colMeans(chain$yearTrend,na.rm = TRUE), parameters$yearTrend)
+  abline(a=0,b=1)
+
+  ## Bias terms
+  mean(chain$mu)
+  parameters$mu
+  plot(chain$mu)
+  
+  mean(chain$theta) + mean(colMeans(chain$gamma)) + mean(colMeans(chain$delta),na.rm=TRUE)
+  parameters$theta + mean(parameters$delta) + mean(parameters$gamma)
+  plot(chain$theta)
+
+  colMeans(chain$gamma) - mean(colMeans(chain$gamma))
+  parameters$gamma - mean(parameters$gamma)
+  plot(parameters$gamma - mean(parameters$gamma), colMeans(chain$gamma) - mean(colMeans(chain$gamma)))
+  abline(a=0,b=1)
+  
+  colMeans(chain$delta) - mean(colMeans(chain$delta))
+  parameters$delta - mean(parameters$delta)
+  plot(parameters$delta - mean(parameters$delta), colMeans(chain$delta) - mean(colMeans(chain$delta)))
+  abline(a=0,b=1)
+
+  ##variance parameters
+  mean(chain$sigmaDeltaSq)
+  parameters$sigmaDeltaSq
+  
+  mean(chain$sigmaGammaSq)
+  parameters$sigmaGammaSq
+
+
+  mean(chain$sigmaPiSq,na.rm = TRUE)
+  parameters$sigmaPiSq
+  
+  mean(chain$sigmaESq)
+  parameters$sigmaESq
+
+  mean(chain$sigmaSq.yearTrend)
+  plot(chain$sigmaSq.yearTrend)
+  parameters$sigmaSq.yearTrend
+
+  mean(chain$sigmaPiSq)
+  parameters$sigmaPiSq
+  plot(chain$sigmaPiSq)  
+
+  
+#+END_SRC
+
+* Fake Data Simulation - From Variance Parameters
+
+#+BEGIN_SRC R
+
+  numYears = 7
+  numSites = 27
+  numLists = 8
+
+  
+  data = list("R" = matrix(1:numSites * 20000, nrow = numSites, ncol = numYears ),
+              "Y" = array(NA, dim = c(numSites,numLists, numYears)),
+              "phat" = array(NA, dim = c(numSites, numLists, numYears)),
+              "NSU" = matrix(NA, nrow = numSites, ncol = numYears ),
+              "D" = matrix(300, nrow = numSites, ncol = numYears ),
+              "n" = round(array(runif(numYears*numSites*numLists, min = 100, max = 500), dim = c(numSites, numLists, numYears))),
+              "numSites" = numSites,
+              "numLists" = numLists,
+              "numYears" = numYears
+              )
+
+  
+  parameters = list("sigmaPiSq" = .3,
+                    "sigmaSq0" = .3,
+                    "sigmaSq.yearTrend" = .07,                  
+                    "sigmaDeltaSq" = .5,
+                    "sigmaGammaSq" = .3,
+                    "sigmaESq" = 20,
+                    "sigmaSSq" = 1,#.3,
+                    "n" = round(array(runif(numYears*numSites*numLists, min = 100, max = 500), dim = c(numSites, numLists, numYears))),
+                    "sigmaESq" = .05*mean(n))
+
+  sim = simFromVarParameters(data, parameters, p = array(runif(numYears*numSites*numLists, max = .3, min = .001 ), dim = c(numSites, numLists, numYears)) )
+  results2 = simFromPrior(sim$data,10,10)#For a starting point for chain
+  parameters = sim$parameters
+  data = sim$data
+  
+  data$phat[,,3] = NA
+  data$NSU[,-3] = NA
+    
+  ### Fit model
+  print(parameters$theta)
+  print(parameters$mu)
+  print(parameters$mu0)
+  results = runMCMC(data, results2$parameters , .1, 10000, 1,1000 )
+  chain = results$chain
+  current = results$current
+
+  results = runMCMC(data, current, .1, 10000, 20, 10000 )
+  chain = results$chain
+  current = results$current
+  
+  ### Compare Estimates to observations
+  ## pi
+  apply(chain$pi, FUN = mean, MARGIN = c(2,3), na.rm=TRUE)
+  parameters$pi
+  plot(log(parameters$pi ),   apply(log(chain$pi), FUN = mean, MARGIN = c(2,3), na.rm=TRUE))
+  abline(a=0,b=1)
+
+  ##Pop size
+  apply(chain$N, FUN = mean, MARGIN = c(2,3))
+  parameters$N
+  plot( apply(log(chain$N), FUN = mean, MARGIN = c(2,3)), log(parameters$N))
+  abline(a=0,b=1)
+
+  
+  ## alpha/beta
+  mean(chain$mu0)
+  mean(chain$sigmaSq0)
+  parameters$mu0
+  parameters$sigmaSq0
+
+  ##Year Trend
+  parameters$yearTrend 
+  colMeans(chain$yearTrend,na.rm = TRUE)
+  plot(colMeans(chain$yearTrend,na.rm = TRUE), parameters$yearTrend)
+  abline(a=0,b=1)
+
+  ## Bias terms
+  mean(chain$mu)
+  parameters$mu
+  plot(chain$mu)
+  
+  mean(chain$theta) + mean(colMeans(chain$gamma)) + mean(colMeans(chain$delta),na.rm=TRUE)
+  parameters$theta + mean(parameters$delta) + mean(parameters$gamma)
+  plot(chain$theta)
+
+  colMeans(chain$gamma) - mean(colMeans(chain$gamma))
+  parameters$gamma - mean(parameters$gamma)
+  plot(parameters$gamma - mean(parameters$gamma), colMeans(chain$gamma) - mean(colMeans(chain$gamma)))
+  abline(a=0,b=1)
+  
+  colMeans(chain$delta) - mean(colMeans(chain$delta))
+  parameters$delta - mean(parameters$delta)
+  plot(parameters$delta - mean(parameters$delta), colMeans(chain$delta) - mean(colMeans(chain$delta)))
+  abline(a=0,b=1)
+
+  ##variance parameters
+  mean(chain$sigmaDeltaSq)
+  parameters$sigmaDeltaSq
+  
+  mean(chain$sigmaGammaSq)
+  parameters$sigmaGammaSq
+
+
+  mean(chain$sigmaPiSq,na.rm = TRUE)
+  parameters$sigmaPiSq
+
+  mean(chain$sigmaSSq,na.rm = TRUE)
+  parameters$sigmaSSq
+  
+  mean(chain$sigmaESq)
+  parameters$sigmaESq
+
+  mean(chain$sigmaSq.yearTrend)
+  plot(chain$sigmaSq.yearTrend)
+  parameters$sigmaSq.yearTrend
+
+  mean(chain$sigmaPiSq)
+  parameters$sigmaPiSq
+  plot(chain$sigmaPiSq)  
+  
+#+END_SRC
+
+
+* Fake Data Simulation - From Chosen Parameters
+
+#+BEGIN_SRC R
+
+
+  numYears = 7
+  numSites = 27
+  numLists = 8
+
+  
+  data = list("R" = matrix(1:numSites * 20000, nrow = numSites, ncol = numYears ),
+              "Y" = array(NA, dim = c(numSites,numLists, numYears)),
+              "phat" = array(NA, dim = c(numSites, numLists, numYears)),
+              "NSU" = matrix(NA, nrow = numSites, ncol = numYears ),
+              "D" = matrix(300, nrow = numSites, ncol = numYears ),
+              "n" = round(array(runif(numYears*numSites*numLists, min = 100, max = 500), dim = c(numSites, numLists, numYears))),
+              "numSites" = numSites,
+              "numLists" = numLists,
+              "numYears" = numYears
+              )
+
+  
+  parameters = list("sigmaSq0" = .4,                    
+                    "sigmaPiSq" = .3,
+                    "sigmaSq.yearTrend" = .07,                  
+                    "sigmaDeltaSq" = .5,
+                    "sigmaGammaSq" = .3,
+                    "sigmaESq" = 20,
+                    "n" = round(array(runif(numYears*numSites*numLists, min = 100, max = 500), dim = c(numSites, numLists, numYears))),
+                    "sigmaESq" = .05*mean(n))
+
+  p.shared = array(runif(numYears*numSites*numLists, max = .3, min = .001 ), dim = c(numSites, numLists, numYears))
+  sim = simFromVarParameters(data, parameters, p = p.shared )
+  results2 = simFromPrior(sim$data,10,10)#For a starting point for chain
+  parameters = sim$parameters
+  data = sim$data
+  
+  sim2 = simFromParameters(data, parameters)
+  results2 = simFromPrior(sim$data,10,10)#For a starting point for chain
+  parameters2 = sim2$parameters
+  data2 = sim2$data
+
+  plot(data$Y,data2$Y)
+  plot(log(data$phat),log(data2$phat))
+  plot(log(data$NSU),log(data2$NSU))
+
+  parameters$pi - parameters2$pi
+  parameters$N - parameters2$N
+  parameters$theta - parameters2$theta
+  parameters$delta - parameters2$delta
+  parameters$gamma - parameters2$gamma
+  parameters$p - parameters2$p
+  parameters$mu - parameters2$mu
+  parameters$sigmaNSq - parameters2$sigmaNSq
+  
+#+END_SRC
+
+* Analysis of Data
+
+** Load Data Function
+
+#+BEGIN_SRC R
+  
+  LoadData = function()
+  {    
+                                        # Open Data Files
+      
+      dat2009 = read.table("./data/2009Local.csv", sep = ",", header = TRUE)
+      dat2011 = read.table("./data/2011Local.csv", sep = ",", header = TRUE)
+      dat2016 = read.table("./data/2016Local.csv", sep = ",", header = TRUE)
+
+                                        # Load Multipler Data
+      lists = c("DTF", "DTP", "Hospital", "NGO", "Prevention", "SMT", "Survey") 
+      sites = dat2009$Oblast
+      years = c("2007", "2008", "2009", "2010", "2011", "2012", "2013", "2014", "2015")
+      
+      phat = array(data=NA,dim = c(27,7,9), dimnames = list(sites, lists, years))
+      Y = array(data=NA,dim = c(27,7,9), dimnames = list(sites, lists, years))
+      n = array(data=NA,dim = c(27,7,9), dimnames = list(sites, lists, years))
+
+      ## DTF List
+
+      phat[,1,9]= dat2016$Percent.Reporting.a.Stay
+      Y[,1,9] = dat2016$Total.Num.Staying.In.State.Drug.Facility
+      n[,1,9] = dat2016$Surveyed.in.2015
+
+      ## DTP List
+      
+      phat[,2,8]= dat2016$Report.Covered.2014
+      Y[,2,8] = dat2016$Covered.By.Drug.Treatment.Program.2014
+      n[,2,8] = dat2016$Surveyed.in.2015
+
+      phat[,2,9]= dat2016$Report.Covered.2015
+      Y[,2,9] = dat2016$Covered.By.Drug.Treatment.Program.2015
+      n[,2,9] = dat2016$Surveyed.in.2015
+      
+      ## Hospitalization List
+      
+      phat[,3,1] = dat2009$Percent.Report.in.2008.being.hospitalized.in.2007
+      Y[,3,1] = dat2009$X2007.Total.Hospitalized
+      n[,3,1] = dat2009$Num.Surveyed
+
+      phat[,3,4] = dat2011$Prop.of.2011.Survey.Hospitalized.in.2010
+      Y[,3,4] = dat2011$Total.Hospitalized.in.2010
+      n[,3,4] = dat2011$X2011.Survey.Sample.Size
+      
+      phat[,3,8]= dat2016$Percent.Reporting.Hospitalization.2014
+      Y[,3,8] = dat2016$Hospitalized.For.Addiction.2014
+      n[,3,8] = dat2016$Surveyed.in.2015
+      
+      phat[,3,9] = dat2016$Percent.Reporting.Hospitalization.2015
+      Y[,3,9] = dat2016$Hospitalized.For.Addiction.2015
+      n[,3,9] = dat2016$Surveyed.in.2015
+      
+      ## NGO List
+      
+      phat[,4,4] = dat2011$Overlap/dat2011$Number.Answered.Question.on.Survey
+      Y[,4,4] = dat2011$Total.Registered.with.NGO.for.Rapid.Tests
+      n[,4,4] = dat2011$X2011.Survey.Sample.Size
+      
+      phat[,4,9]= dat2016$Reported.Registration.to.NGO
+      Y[,4,9] = dat2016$Registered.by.NGO
+      n[,4,9] = dat2016$Surveyed.in.2015
+      
+      ## Prevention List
+      
+      phat[,5,4] = dat2011$Proportion.in.Survey.Reporting.Registration
+      Y[,5,4] = dat2011$Total.Registered.for.Prevention.Services
+      n[,5,4] = dat2011$X2011.Survey.Sample.Size
+      
+      ## SMT List
+      
+      phat[,6,4] = dat2011$Proportion.Reporting.to.have.Recieved.in.2011
+      Y[,6,4] = dat2011$Total.Recieved.SMT
+      n[,6,4] = dat2011$X2011.Survey.Sample.Size
+      
+      phat[,6,8]= dat2016$Reported.SMT.2014
+      Y[,6,8] = dat2016$Recieved.SMT.2014
+      n[,6,8] = dat2016$Surveyed.in.2015
+      
+      phat[,6,9] = dat2016$Reported.SMT.2015
+      Y[,6,9] = dat2016$Recieved.SMT.2015
+      n[,6,9] = dat2016$Surveyed.in.2015
+      
+      ## Behav Surveys 
+
+      phat[,7,3] = dat2011$Prop.of.2011.also.in.2009
+      Y[,7,3] = dat2011$Number.Surveyed.in.2009
+      n[,7,3] = dat2011$X2011.Survey.Sample.Size
+      
+      phat[,7,7]= dat2016$Num.Reporting.Being.Surveyed.in.2013/dat2016$Surveyed.in.2015
+      Y[,7,7] = dat2016$Surveyed.in.2013
+      n[,7,7] = dat2016$Surveyed.in.2015
+
+      
+                                        # Load NSU Data
+      
+      NSU = matrix(data=NA, nrow = 27, ncol = 9, dimnames = list(sites, years) )
+      NSU.se = matrix(data=NA, nrow = 27, ncol = 9, dimnames = list(sites, years) )
+
+      NSU[,2] = dat2009$NSU
+                                        #NSU.se[,2] = (NSU[,2] - dat2009$NSU.Lower)/2
+      NSU.se[,2] = (-NSU[,2] + dat2009$NSU.Upper)/2
+      
+      
+
+                                        # Load Population    
+
+      pop = read.table("./data/pop.csv", sep = ",", header = TRUE)
+      R = as.matrix(pop[,-1])
+      rownames(R) = dat2009$Oblast                                       
+      colnames(R) = c("2007", "2008", "2009", "2010", "2011", "2012", "2013", "2014", "2015", "2016", "2017" )
+      
+      ## Remove Years not in data
+      R = R[,-c(10,11)]
+
+      D = R*(NSU/(NSU.se^2))
+
+
+      phat[phat == 0] = NA
+      
+      n[is.na(Y)] = NA
+      Y[is.na(Y)] = NA
+      phat[is.na(Y)] = NA
+
+
+      n[is.na(phat)] = NA
+      Y[is.na(phat)] = NA
+      phat[is.na(phat)] = NA
+      
+      
+      data = list("n" = n,
+                  "phat" = phat,
+                  "Y" = Y,
+                  "NSU" = NSU,
+                  "D" = D,
+                  "R" = R,
+                  "numSites" = dim(Y)[1],
+                  "numLists" = dim(Y)[2],
+                  "numYears" = dim(Y)[3] )
+
+      return(data)
+  }
+
+#+END_SRC
+
+** Load Data
+
+#+BEGIN_SRC R
+
+  data = LoadData()
+
+#+END_SRC
+
+** Run 
+
+#+BEGIN_SRC R
+
+  numYears = data$numYears
+  numSites = data$numSites
+  numLists = data$numLists
+  
+  parameters = list("mu0" = -3,
+                    "sigmaSq0" = .1,
+                    "sigmaPiSq" = .3,
+                    "sigmaSq.yearTrend" = .07,                  
+                    "sigmaDeltaSq" = .5,
+                    "sigmaGammaSq" = .3,
+                    "sigmaSSq" = 1,
+                    "sigmaESq" = 20,
+                    "n" = data$n,
+                    "sigmaESq" = .5*mean(n))
+
+  parameters$n[is.na(data$n)] = mean(data$n)
+
+  ### Find Starting Point for Chain
+  sim = simFromVarParameters(data, parameters, p = array(runif(numYears*numSites*numLists, max = .3, min = .001 ), dim = c(numSites, numLists, numYears)) )
+  
+  ### Fit model - 5 Chains
+  sim = simFromVarParameters(data, parameters, p = array(runif(numYears*numSites*numLists, max = .3, min = .001 ), dim = c(numSites, numLists, numYears)) )
+  results = runMCMC(data, sim$parameters , 1, 10000, 1 ,1 )
+  current1 = results$current
+  results = runMCMC(data, current1 , .3, 10000, 20,1 )
+  chain1 = results$chain
+  current1 = results$current
+
+  sim = simFromVarParameters(data, parameters, p = array(runif(numYears*numSites*numLists, max = .3, min = .001 ), dim = c(numSites, numLists, numYears)) )
+  results = runMCMC(data, sim$parameters , .5, 10000, 1000 ,1 )
+  current2 = results$current
+  results = runMCMC(data, current2 , .01, 10000, 10,1 )
+  chain2 = results$chain
+  current2 = results$current
+
+  sim = simFromVarParameters(data, parameters, p = array(runif(numYears*numSites*numLists, max = .3, min = .001 ), dim = c(numSites, numLists, numYears)) )
+  results = runMCMC(data, sim$parameters , .5, 10000, 100 ,1 )
+  current3 = results$current
+  results = runMCMC(data, current3 , .39, 10000, 400,1 )
+  chain3 = results$chain
+  current3 = results$current
+
+  sim = simFromVarParameters(data, parameters, p = array(runif(numYears*numSites*numLists, max = .3, min = .001 ), dim = c(numSites, numLists, numYears)) )
+  results = runMCMC(data, sim$parameters , .5, 10000, 1000 ,1 )
+  current4 = results$current
+  results = runMCMC(data, current4 , .39, 10000, 400,1 )
+  chain4 = results$chain
+  current4 = results$current
+
+  chain = chainBind(chain3, chain4)
+  
+  quantile(chain$theta, probs = c(.025, .975))
+  
+                                        #No NSU
+  data2 = data
+  data2$NSU[,2] = NA
+  data2$D[,2] = NA
+  results = runMCMC(data2, current3 , .5, 10000, 10,1 )
+  chain.nsu = results$chain
+  current.nsu = results$current
+  results = runMCMC(data2, current.nsu , 3, 10000, 10,1 )
+  chain.nsu = results$chain
+  current.nsu = results$current
+
+  data3 = data.frame("site" = rep(1:27, 7*27),
+                     "list" = rep(1:7, each=27, times =9),
+                     "year" = rep(1:9, each = 27*7),
+                     "mult" = rep(NA, 9*7*27)
+                     )
+
+  for(e in 1:(9*7*27))
+  {
+
+      i = data3$site[e]
+      j = data3$list[e]
+      t = data3$year[e]
+
+      data3$mult[e] = data$Y[i,j,t] / data$phat[i,j,t]
+
+  }
+
+  data3$site = factor(data3$site)
+  data3$list = factor(data3$list)
+  data3$year = factor(data3$year)
+  
+  fit = lm(log(mult) ~ site:year + (0+list)  ,data=data3  )
+  summary(fit)
+  mean(coef(fit)[1:7]) - 
+
+
+  #Ran Chain3 longer than others
+  save.image("chains.RDATA")
+
+  
+  ### Trace Plots
+  plot(chain$theta)
+  plot(chain$mu0)
+
+  quantile(chain$mu, probs = c(.025, .5, .975))
+  quantile(chain4$theta, probs = c(.025, .5, .975))
+
+  mean(colMeans(chain4$pi[,,2]))
+  mean(data$NSU/data$R, na.rm=TRUE)
+
+  c("DTF", "DTP", "Hospital", "NGO", "Prevention", "SMT", "Survey") 
+  quantile(chain3$theta + chain3$gamma[,1], probs = c(.025,.5,.975))
+  quantile(chain3$theta + chain3$gamma[,2], probs = c(.025,.5,.975))
+  quantile(chain3$theta + chain3$gamma[,3], probs = c(.025,.5,.975))
+  quantile(chain3$theta + chain3$gamma[,4], probs = c(.025,.5,.975))
+  quantile(chain3$theta + chain3$gamma[,5], probs = c(.025,.5,.975))
+  quantile(chain3$theta + chain3$gamma[,6], probs = c(.025,.5,.975))
+  quantile(chain3$theta + chain3$gamma[,7], probs = c(.025,.5,.975))
+
+  quantile(chain3$mu, probs = c(.025,.5,.975))
+
+
+  
+  
+#+END_SRC
+
+* Plots
+
+#+BEGIN_SRC R
+
+  library(ggplot2)
+
+  setEPS()
+  postscript("./plots/fittedvalues.eps", height = 4, width = 5.5)
+  par(mfrow=c(1,1), las = 0,mex=0.5, mai=c(0.5,0.5,0.2,0.2))
+  RateEstimates = apply(chain4$pi, MARGIN = c(2,3), FUN = mean )
+
+  plot(RateEstimates[1,], type="l", ylim = c(0, .035), main = "Population prevalence estimates over time", ylab = "Rate estimate", xlab = "Year", axes=F)
+  
+  for(i in 2:25)
+  {
+      lines(RateEstimates[i,], type="l")
+  }
+  axis(1, at=1:9, labels=2007:2015)
+  axis(2)
+  dev.off()
+  
+  setEPS()
+  postscript("./plots/fittedvalues2.eps", height = 4, width = 5.5)
+  par(mfrow=c(1,1), las = 0,mex=0.5, mai=c(0.5,0.5,0.2,0.2))
+
+  SizeEstimates = colMeans(chain3$N)
+  plot(SizeEstimates[1,], type="l", ylim = c(0, 50000), main = "Population size estimates over time", ylab = "Size estimate (in thousands)", xlab = "Year",axes=F)
+  for(i in 2:25)
+  {
+      lines(SizeEstimates[i,], type="l")
+  }
+  axis(1, at=1:9, labels=2007:2015)
+  axis(2, at=(0:10)*5000,labels = (0:10)*5)
+  dev.off()
+
+  Sources = c("DTF", "DTP", "Hospital", "NGO", "Prevention", "SMT", "Survey","NSU") 
+  Oblast = row.names(data$phat)
+  City =  c("Simferopol",
+            "Kyiv",
+            "Bila Tserkva",
+            "Vinnytsia",
+            "Lutsk",
+            "Dnipro",
+            "Donetsk",
+            "Zhytomyr",
+            "Uzhhorod",
+            "Zaporizhzhia",
+            "Ivano-Frankivsk",
+            "Kropyvnytskyi",
+            "Luhansk",
+            "Lviv",
+            "Mykolayiv",
+            "Odessa",
+            "Poltava",
+            "Rivne",
+            "Sumy",
+            "Ternopil",
+            "Kharkiv",
+            "Kherson",
+            "Khmelnytskyi",
+            "Cherkasy",
+            "Chernivtsi",
+            "Chernihiv",
+            "Sevastopol"
+            )
+  Years = c("2007", "2008", "2009", "2010", "2011", "2012", "2013", "2014", "2015")
+
+    
+  plot.data = data.frame("Source" = rep(Sources, data$numSites*data$numYears),
+                         "Oblast" = rep(Oblast, each = length(Sources), times = data$numYears),
+                         "City" = rep(City, each = length(Sources), times = data$numYears),
+                         "Year" = rep(Years, each = length(Sources)*data$numSites),
+                         "phat" = rep(NA, data$numSites*data$numYears*length(Sources)),
+                         "Y" = rep(NA, data$numSites*data$numYears*length(Sources)),
+                         "NSU" = rep(NA, data$numSites*data$numYears*length(Sources)),
+                         "R" = rep(NA, data$numSites*data$numYears*length(Sources)),
+                         "pi.estimate" = rep(NA, data$numSites*data$numYears*length(Sources)),
+                         "pi.lower" = rep(NA, data$numSites*data$numYears*length(Sources)),
+                         "pi.upper" = rep(NA, data$numSites*data$numYears*length(Sources)),
+                         "N.estimate" = rep(NA, data$numSites*data$numYears*length(Sources)),
+                         "N.lower" = rep(NA, data$numSites*data$numYears*length(Sources)),
+                         "N.upper" = rep(NA, data$numSites*data$numYears*length(Sources)),
+                         "Residual" = rep(NA, data$numSites*data$numYears*length(Sources))
+                         )
+
+  #plot.data$Residual = log(plot.data$Source.Estimate) - log(plot.data$N.estimate)
+  
+  N.estimates = colMeans(chain$N)
+  N.upper = apply(chain$N, MARGIN = c(2,3), FUN = quantile, probs = .975)
+  N.lower = apply(chain$N, MARGIN = c(2,3), FUN = quantile, probs = .025)
+  pi.estimates = colMeans(chain$pi)
+  pi.upper = apply(chain$pi, MARGIN = c(2,3), FUN = quantile, probs = .975)
+  pi.lower = apply(chain$pi, MARGIN = c(2,3), FUN = quantile, probs = .025)
+  fitted = aperm(array(colMeans(log(chain$N)), dim = c(data$numSites, data$numYears, data$numLists )), c(1,3,2) ) + mean(chain4$theta) + replicate(numYears,outer(colMeans(chain4$delta), colMeans(chain4$gamma), FUN=function(x,y) (x+y)))
+
+  
+  for(t in 1:data$numYears)
+  {
+      for(i in 1:data$numSites)
+      {
+          subset = plot.data$City == City[i] &
+              plot.data$Year == Years[t] 
+              
+          plot.data$R[subset] = data$R[i,t]
+          plot.data$N.estimate[subset] = N.estimates[i,t]
+          plot.data$N.lower[subset] = N.lower[i,t]
+          plot.data$N.upper[subset] = N.upper[i,t]
+          plot.data$pi.estimate[subset] = pi.estimates[i,t]
+          
+          for(j in 1:data$numLists )
+          {
+              subset = plot.data$City == City[i] &
+                  plot.data$Year == Years[t] &
+                  plot.data$Source == Sources[j]
+
+              plot.data$Y[subset] = data$Y[i,j,t]
+              plot.data$phat[subset] = data$phat[i,j,t]
+              plot.data$Residual[subset] = log(data$Y[i,j,t]/data$phat[i,j,t]) - fitted[i,j,t]
+              
+
+          }
+
+          ## NSU
+          subset = plot.data$City == City[i] &
+              plot.data$Year == Years[t] &
+              plot.data$Source == "NSU"
+
+          plot.data$NSU[subset] = data$NSU[i,t]
+
+      }
+  }
+
+  plot.data$Source.Estimate = plot.data$Y / plot.data$phat
+  plot.data$Source.Estimate[is.na(plot.data$Source.Estimate)] = plot.data$NSU[is.na(plot.data$Source.Estimate)]
+
+  subset = !is.na(log(plot.data$Source.Estimate))
+
+  setEPS()
+  postscript("./plots/sizeComparison.eps", height = 3.5, width = 4.5)
+  par(mfrow=c(1,1), las = 0,mex=0.5, mai=c(0.5,0.5,0.2,0.2))
+  plot(log(plot.data$N.estimate), log(plot.data$Source.Estimate), xlab = "Estimated size on log scale using proposed model", ylab = "Source size estimates on log scale" )
+  points(log(plot.data$N.estimate)[subset], log(plot.data$N.lower)[subset],pch="_")
+  points(log(plot.data$N.estimate)[subset], log(plot.data$N.upper)[subset],pch="_")
+  abline(a=0,b=1)
+  dev.off()
+
+
+  plot(plot.data$pi.estimate, plot.data$Source.Estimate/plot.data$R )
+  plot(log(plot.data$pi.estimate), log(plot.data$Source.Estimate/plot.data$R ))
+  points(log(plot.data$N.estimate)[subset], log(plot.data$N.lower)[subset],pch=3)
+  points(log(plot.data$N.estimate)[subset], log(plot.data$N.upper)[subset],pch=3)
+  abline(a=0,b=1)
+  
+  plot(log(plot.data$N.estimate), log(plot.data$N.estimate) - log(plot.data$N.lower),pch=3 )
+
+  theme_set(theme_bw(16))
+
+  plot.data2 = plot.data[!is.na(plot.data$Source.Estimate) , ]
+  plot.data2$Year = factor(plot.data2$Year)
+  
+  ggplot(data = plot.data2, aes(x=City, y=Source.Estimate/R)  ) +
+      geom_boxplot( outlier.shape = NA ) +
+      geom_point(aes(shape = Year, group = Year), position = position_dodge(width=.7)) +
+      theme(axis.text.x = element_text(angle = 90)) +
+      ylab("Prevalence of IDU Estimates") +
+      scale_shape_manual(values=c(3,19,4,5,9,6,8))
+
+  ggsave("sourcePrevalence.eps")
+
+  plot.data2 = plot.data[!is.na(plot.data$Source.Estimate) , ]
+  plot.data2 = plot.data[plot.data$Year %in% unique(plot.data2$Year) , ]
+  plot.data2$Year = factor(plot.data2$Year)
+
+
+
+  plot.data.all = data.frame("Site" = rep(1:numSites, times = numYears),
+                             "Year" = rep(1:numYears, each = numSites),
+                             "N.lower" = rep(NA, numYears*numSites),
+                             "N.est" = rep(NA, numYears*numSites),
+                             "N.upper" = rep(NA, numYears*numSites),
+                             "pi.lower" = rep(NA, numYears*numSites),
+                             "pi.est" = rep(NA, numYears*numSites),
+                             "pi.upper" = rep(NA, numYears*numSites),
+                             "R" = rep(NA, numYears*numSites)
+                             )
+
+  I = length(plot.data.all$Site)
+
+  N.estimates = colMeans(chain4$N)
+  N.upper = apply(chain4$N, MARGIN = c(2,3), FUN = quantile, probs = .975)
+  N.lower = apply(chain4$N, MARGIN = c(2,3), FUN = quantile, probs = .025)
+  pi.estimates = colMeans(chain4$pi)
+  pi.upper = apply(chain4$pi, MARGIN = c(2,3), FUN = quantile, probs = .975)
+  pi.lower = apply(chain4$pi, MARGIN = c(2,3), FUN = quantile, probs = .025)
+
+  for(i in 1:I)
+  {
+
+      plot.data.all$N.lower[i] = N.lower[ plot.data.all$Site[i], plot.data.all$Year[i] ]
+      plot.data.all$N.est[i] = N.estimates[ plot.data.all$Site[i], plot.data.all$Year[i] ]
+      plot.data.all$N.upper[i] = N.upper[ plot.data.all$Site[i], plot.data.all$Year[i] ]
+
+      plot.data.all$pi.lower[i] = pi.lower[ plot.data.all$Site[i], plot.data.all$Year[i] ]
+      plot.data.all$pi.est[i] = pi.estimates[ plot.data.all$Site[i], plot.data.all$Year[i] ]
+      plot.data.all$pi.upper[i] = pi.upper[ plot.data.all$Site[i], plot.data.all$Year[i] ]
+      
+      plot.data.all$R[i] = data$R[ plot.data.all$Site[i], plot.data.all$Year[i] ]
+
+
+  }
+
+  Years = c("2007", "2008", "2009", "2010", "2011", "2012", "2013", "2014", "2015")
+
+  high.sites = unique(plot.data.all$Site[plot.data.all$N.est > 20000 & plot.data.all$Year == 9])  
+  high.sites = plot.data.all$Site %in% high.sites
+  low.sites = unique(plot.data.all$Site[which(plot.data.all$N.est < 2500  & plot.data.all$Year == 1)])
+  low.sites = plot.data.all$Site %in% low.sites
+
+  plot.data.all$Col = factor(low.sites + 2*high.sites, labels = c("A", "B", "C"), ordered = TRUE  )
+  plot.data.all$Col = factor(plot.data.all$Col, levels = c("A", "B", "C"))
+  plot.data.all$Site.Name = City[plot.data.all$Site]
+  plot.data.all$Year.Labs = Years[ plot.data.all$Year ]
+
+
+  plot.data.all
+
+
+  plot.data.all$Color = c("A","B")[1 + (plot.data.all$Year %in% 5:6 ) ]
+  
+  ggplot(data = plot.data.all, aes(x=factor(Site.Name), y=N.est, group = factor(Year), shape = factor(Year), color = Color)  ) +
+      geom_point( position = position_dodge(width=.925), show.legend = FALSE) +
+      theme(axis.text.x = element_text(angle = 90)) +
+      geom_errorbar(aes(ymin = N.lower, ymax=N.upper), position = position_dodge(width=.925),show.legend = FALSE) +
+      ylab("Size of IDU Estimates") +
+      xlab("City") +
+      scale_color_manual(values = c( A = "black", B = "darkgrey")) +
+      scale_shape_manual(values=c(3,19,4,5,64,79 ,9 ,6,8))
+  scale_shape_manual(values=c(3,19,4,5,9,6,8))
+
+  ggsave("sizeEstimates2.eps")
+
+  
+  library(RColorBrewer)
+  library(ggpubr)
+  library(ggrepel)
+  
+  prevs = ggplot(data = plot.data.all, aes(x = Year.Labs, y = pi.est, group = Site, color = Col  ) ) +
+      geom_line( lwd= .9, show.legend = FALSE) +
+       scale_color_manual(values = c(C ="black",B = "#8c8c8c",A = "#dcdcdc")) +
+      ylab("Estimated IDU Prevalence")+
+      xlab("Year")
+
+  sizes = ggplot(data = plot.data.all, aes(x = Year.Labs, y = N.est/1000, group = Site, color = Col  ) ) +
+      geom_line(lwd= .9, show.legend = FALSE ) +
+      scale_color_manual(values = c("#dcdcdc", "#8c8c8c", "black"), breaks = c("A", "B", "C")) +
+      ylab("Estimated IDU size (in thousands)")+
+      xlab("Year")
+
+  ggarrange(prevs, sizes, 
+          labels = c("A", "B"),
+          ncol = 2, nrow = 1)
+
+  theme_set(theme_bw())
+
+  
+  prevs = ggplot(data = plot.data.all, aes(x = Year.Labs, y = pi.est, group = Site) ) +
+      geom_line(data = plot.data.all[plot.data.all$Col == "A",],aes(x = Year.Labs, y = pi.est, group = Site) ,lwd= .9, show.legend = FALSE, col ="#dcdcdc" ) +
+      geom_line(data = plot.data.all[plot.data.all$Col == "B",],aes(x = Year.Labs, y = pi.est, group = Site) ,lwd= .9, show.legend = FALSE, col = "#8c8c8c") +
+      geom_line(data = plot.data.all[plot.data.all$Col == "C",],aes(x = Year.Labs, y = pi.est, group = Site) ,lwd= .9, show.legend = FALSE, col = "black") +
+      geom_label_repel( data = plot.data.all[plot.data.all$Col != "A" & plot.data.all$Year == 9,],
+                       aes(x = Year.Labs, y = pi.est, group = Site, label = Site.Name ), min.segment.length = 0.1, point.padding = .3, alpha = .5 ) +
+      ylab("Estimated IDU Prevalence")+
+      xlab("Year")
+
+  sizes = ggplot(data = plot.data.all, aes(x = Year.Labs, y = N.est/1000, group = Site) ) +
+      geom_line(data = plot.data.all[plot.data.all$Col == "A",],aes(x = Year.Labs, y = N.est/1000, group = Site) ,lwd= .9, show.legend = FALSE, col ="#dcdcdc" ) +
+      geom_line(data = plot.data.all[plot.data.all$Col == "B",],aes(x = Year.Labs, y = N.est/1000, group = Site) ,lwd= .9, show.legend = FALSE, col = "#8c8c8c") +
+      geom_line(data = plot.data.all[plot.data.all$Col == "C",],aes(x = Year.Labs, y = N.est/1000, group = Site) ,lwd= .9, show.legend = FALSE, col = "black") +
+          geom_label_repel( data = plot.data.all[plot.data.all$Col != "A" & plot.data.all$Year == 9,],
+                      aes(x = Year.Labs, y = N.est/1000, group = Site, label = Site.Name ), min.segment.length = 0, alpha = .5 ) +  
+      ylab("Estimated IDU size (in thousands)")+
+      xlab("Year")
+  
+  ggarrange(prevs, sizes, 
+            labels = c("A", "B"),
+            ncol = 2, nrow = 1)
+
+  ggsave("fittedvalues.eps")
+  ggsave("fittedvalues.pdf")
+
+
+
+  
+  plot.data.sites = data.frame("Site" = 1:numSites,
+                               "Site.Labs" = City,
+                               "Delta.estimate" = colMeans(chain4$delta),
+                               "Delta.upper" = apply(chain4$delta, MARGIN = c(2), FUN = quantile, probs = .975),
+                               "Delta.lower" = apply(chain4$delta, MARGIN = c(2), FUN = quantile, probs = .025)
+                               )
+  
+
+
+  
+  ggplot(data = plot.data.sites, aes(x = Site.Labs, y = Delta.estimate, ymin = Delta.lower, ymax = Delta.upper)) +
+      geom_point() +
+      geom_errorbar() +
+      theme(axis.text.x = element_text(angle = 270)  ) +
+      ylab("Site Specific Bias (delta)") +
+      xlab("Site")
+
+  ggsave("delta.eps")
+
+  plot.data.lists = data.frame("List" = 1:numLists,
+                               "List.Labs" = Sources[-8],
+                               "Gamma.estimate" = colMeans(chain4$gamma),
+                               "Gamma.upper" = apply(chain4$gamma, MARGIN = c(2), FUN = quantile, probs = .975),
+                               "Gamma.lower" = apply(chain4$gamma, MARGIN = c(2), FUN = quantile, probs = .025)
+                               )
+
+  
+  ggplot(data = plot.data.lists, aes(x = List.Labs, y = Gamma.estimate, ymin = Gamma.lower, ymax = Gamma.upper)) +
+      geom_point() +
+      geom_errorbar() +
+      theme(axis.text.x = element_text(angle = 270)  ) +
+      ylab("Subgroup Specific Bias (gamma)") +
+      xlab("Subgroup")
+
+  ggsave("gamma.eps")
+
+
+#+END_SRC
+
+* Diagnostics
+
+** Residual Plots
+
+#+BEGIN_SRC R
+
+ setEPS()
+postscript("./plots/residuals.eps", height = 5.5, width = 8)
+
+ multest = log(data$Y/data$phat)
+
+par(mfrow=c(2,2), lwd=.8,mex=0.7, mai=c(0.3,0.3,0.2,0.2))
+ fitted = aperm(array(colMeans(log(chain4$N)), dim = c(data$numSites, data$numYears, data$numLists )), c(1,3,2) ) + mean(chain4$theta) + replicate(numYears,outer(colMeans(chain4$delta), colMeans(chain4$gamma), FUN=function(x,y) (x+y)))
+residuals = multest - fitted
+scaled.residuals = sqrt(data$n)*residuals / mean(sqrt(chain4$sigmaESq))
+
+plot(fitted, scaled.residuals, xlab = "Fitted logit value", ylab = "Scaled residual", main = "Multiplier estimate residuals")
+abline(h = 0)
+
+qqnorm(scaled.residuals, main = "Multiplier estimate Q-Q plot" )
+qqline(scaled.residuals)
+
+fitted = apply(log(chain4$N), MARGIN=c(2,3), FUN = median ) + mean(chain4$mu) 
+residuals = (log(data$NSU) - fitted)
+scaled.residuals = residuals / colMeans(sqrt(chain4$sigmaNSq))
+
+plot(fitted, scaled.residuals, xlab = "Fitted log value", ylab = "Scaled residual", main = "Network scale-up residuals")
+abline(h = 0)
+
+qqnorm(scaled.residuals, , main = "Network scale-up Q-Q plot")
+qqline(scaled.residuals)
+
+ dev.off()
+
+ multest = log(data$Y/data$phat)
+ fitted = aperm(array(colMeans(log(chain3$N)), dim = c(data$numSites, data$numYears, data$numLists )), c(1,3,2) ) + mean(chain3$theta) + replicate(numYears,outer(colMeans(chain3$delta), colMeans(chain3$gamma), FUN=function(x,y) (x+y)))
+ residuals = multest - fitted
+ scaled.residuals = sqrt(data$n)*residuals / mean(sqrt(chain4$sigmaESq))
+
+ year = array(NA , dim = dim(scaled.residuals))
+
+ for(i in 1:numYears)
+     year[,,i] = i
+ 
+ plot(year,scaled.residuals)
+ 
+ meanResid = apply(scaled.residuals, MARGIN = 3, FUN = mean, na.rm=TRUE )
+ sdResid = apply(scaled.residuals, MARGIN = 3, FUN = sd, na.rm=TRUE )
+ nResid = apply(!is.na(scaled.residuals), MARGIN = 3, FUN = sum, na.rm=TRUE )
+
+ av.scale = apply(scaled.residuals, MARGIN = c(1,3), FUN = mean, na.rm = TRUE )
+
+ seResid = sdResid/sqrt(nResid)
+
+ cor.test(as.vector(av.scale[,-9]), as.vector(av.scale[,-1]) , use="complete.obs"  )
+
+ fit = lm(as.vector(av.scale[,-9]) ~ as.vector(av.scale[,-1])  )
+
+
+
+ ggplot( data = plot.data, aes(x=Year, y=Residual) ) +
+     geom_point() +
+     stat_summary(aes(y = Residual, group = 1), fun=mean, geom="line")
+
+ ggsave("./yearResid.eps")
+
+ plot.data2 = aggregate(plot.data$Residual, by = list(plot.data$City, plot.data$Year), FUN = mean, na.rm=TRUE)
+ names(plot.data2) = c("City", "Year", "Residual")
+
+ 
+ ggplot( data = plot.data2, aes(x=Year, y=Residual) ) +
+     geom_point() +
+     stat_summary(aes(y = Residual, group = 1), fun=mean, geom="line") +
+     ylab("Average Residual in Site")
+
+ ggsave("./yearResid2.eps")
+
+ plot.data2 = aggregate(plot.data$Residual, by = list(plot.data$Source, plot.data$Year), FUN = mean, na.rm=TRUE)
+ names(plot.data2) = c("Source", "Year", "Residual")
+
+  ggplot( data = plot.data2, aes(x=Year, y=Residual) ) +
+     geom_point() +
+     stat_summary(aes(y = Residual, group = 1), fun=mean, geom="line") +
+     ylab("Average Residual in Site")
+
+ 
+
+ ggsave("./yearResid.eps")
+
+    
+     
+ 
+
+#+END_SRC
+
+* Cross Validation
+
+** Source
+
+ #+BEGIN_SRC R
+   
+   save.image("mainChains.RDATA")
+   rm(chain)
+   rm(chain2)
+   rm(chain3)
+   rm(chain4)
+   
+   chains = list()
+   currents = list()
+   
+   for(j in 1:data$numLists)
+   {
+       print(j)
+       print(timestamp())
+       data2 = data
+       data2$phat[,j,] = NA
+       data2$Y[,j,] = NA
+       data2$n[,j,] = NA
+
+       sink("/dev/null")
+       results = runMCMC(data2, current4 , .4, 10000, 20,10000 )
+       chains[[j]] = results$chain
+       currents[[j]] = results$current
+       sink()
+   }
+
+   save.image("./listCV.RDATA")
+
+   for(j in 1:data$numLists)
+   {
+       print(j)
+       print(timestamp())
+       data2 = data
+       data2$phat[,j,] = NA
+       data2$Y[,j,] = NA
+       data2$n[,j,] = NA
+       
+       sink("/dev/null")
+       results = runMCMC(data2, currents[[j]] , .4, 10000, 20,1000 )
+       chains[[j]] = results$chain
+       currents[[j]] = results$current
+       sink()
+   }
+
+   save.image("./listCV.RDATA")
+
+   
+
+   
+
+ #+END_SRC
+
+*** List Plots
+
+#+BEGIN_SRC R
+
+  load("./listCV.RDATA")
+
+#MARK
+
+  plot.data.all = data.frame("Source" = rep((1:numLists), times = numYears),
+                             "Year" = rep(1:numYears, each = numLists),                             
+                             "pi.Median" = rep(NA, numYears*numLists),
+                             "pi.Width" = rep(NA, numYears*numLists),
+                             "pi.Width2" = rep(NA, numYears*numLists),
+                             "data.present" = rep(NA, numYears*numLists)
+                             )
+
+  for(i in 1:length(plot.data.all$Source) )
+  {
+      mu0 = chains[[ plot.data.all$Source[i] ]]$mu0
+      yearTrend = chains[[ plot.data.all$Source[i] ]]$yearTrend
+
+      medians = rowSums(cbind(mu0, yearTrend[,1:plot.data.all$Year[i] ]  ))
+      
+      plot.data.all$pi.Median[i] = invlogit(mean(medians))
+    
+      limits = quantile(medians, probs = c(.025, .975))
+      width = limits[2] - limits[1]
+      
+      plot.data.all$pi.Width[i] = width
+      plot.data.all$data.present[i] = max(!is.na(data$Y[,plot.data.all$Source[i] ,plot.data.all$Year[i] ]  ))
+
+      pi.upper = apply(logit(chains[[plot.data.all$Source[i]]]$pi), MARGIN = c(2,3), FUN = quantile, probs = .975)
+      pi.lower = apply(logit(chains[[plot.data.all$Source[i]]]$pi), MARGIN = c(2,3), FUN = quantile, probs = .025)
+
+      plot.data.all$pi.Width2[i] = colMeans(pi.upper - pi.lower)[plot.data.all$Year[i]]
+      
+  }
+
+  
+  Sources = c("DTF", "DTP", "Hospital", "NGO", "Prevention", "SMT", "Survey","NSU") 
+  Years = c("2007", "2008", "2009", "2010", "2011", "2012", "2013", "2014", "2015")
+
+  plot.data.all$Year.Labs = Years[ plot.data.all$Year ]
+  plot.data.all$Source.Labs = Sources[ plot.data.all$Source ]
+  
+  A = ggplot(data = plot.data.all, aes(x = Year.Labs, y = pi.Median, group = Source, col = Source.Labs  ) ) +
+      geom_line(show.legend = FALSE, lwd = .7) +
+      geom_point(aes(shape = factor(data.present)), show.legend = FALSE, size = 3) +
+      scale_color_grey(start = .2, end = .8 ) +
+      scale_shape_manual(values=c(1,16)) +
+      xlab("Year") +
+      ylab("Average posterior median prevalence") +
+      geom_label_repel( data = plot.data.all[(plot.data.all$Year == 9 |
+                                              plot.data.all$Year == 1 )
+                                             & plot.data.all$Source.Lab == "NGO",],
+                       aes(x = Year, y = pi.Median, label = Source.Labs ), min.segment.length = 0.1, point.padding = .3, alpha = .5, color = "black" ) +
+      geom_label_repel( data = plot.data.all[(plot.data.all$Year == 1 )
+                                             & plot.data.all$Source.Labs == "Hospital",],
+                       aes(x = Year, y = pi.Median, label = Source.Labs ), min.segment.length = 0.1, point.padding = .3, alpha = .5, color = "black" ) +
+      geom_label_repel( data = plot.data.all[(plot.data.all$Year == 4 )
+                                             & plot.data.all$Source.Labs == "SMT",],
+                       aes(x = Year, y = pi.Median, label = Source.Labs ), min.segment.length = 0.1, point.padding = .3, alpha = .5, color = "black" ) +
+      geom_label_repel( data = plot.data.all[(plot.data.all$Year == 9 )
+                                             & plot.data.all$Source.Labs == "DTP",],
+                       aes(x = Year, y = pi.Median, label = Source.Labs ), min.segment.length = 0.1, point.padding = .3, alpha = .5, color = "black" ) 
+
+
+  
+  B  = ggplot(data = plot.data.all, aes(x = Year.Labs, y = pi.Width2, group = Source, col = Source.Labs  ) ) +
+      geom_line(show.legend = FALSE, lwd = .7) +
+      geom_point(aes(shape = factor(data.present)), show.legend = FALSE, size = 3) +
+      scale_color_grey(start = .2, end = .8 ) +
+      scale_shape_manual(values=c(1,16)) +
+      xlab("Year") +
+      ylab("Mean width of prevalence estimate CI (logit scale)") +
+      geom_label_repel( data = plot.data.all[(plot.data.all$Year == 6 )
+                                             & plot.data.all$Source.Labs == "DTF",],
+                       aes(x = Year, y = pi.Width2, label = Source.Labs ), min.segment.length = 0.1, point.padding = .3, alpha = .5, color = "black" ) +
+      geom_label_repel( data = plot.data.all[(plot.data.all$Year == 6 )
+                                             & plot.data.all$Source.Labs == "NGO",],
+                       aes(x = Year, y = pi.Width2, label = Source.Labs ), min.segment.length = 0.1, point.padding = .3, alpha = .5, color = "black" ) +
+      geom_label_repel( data = plot.data.all[(plot.data.all$Year == 9 )
+                                             & plot.data.all$Source.Labs == "DTP",],
+                       aes(x = Year, y = pi.Width2, label = Source.Labs ), min.segment.length = 0.1, point.padding = .3, alpha = .5, color = "black" ) 
+
+  ggarrange(A, B, 
+            labels = c("A", "B"),
+            ncol = 2, nrow = 1)
+
+  ggsave("./fittedvaluesCV.pdf", width = 8, height = 4)
+  
+  
+  setEPS()
+  postscript("./fittedvaluesCV.eps", height = 7, width = 6)
+  par(mfrow=c(4,2), lwd=.8,mex=0.45, mai=c(0.3,0.3,0.2,0.2))
+
+  groups = c( "DTF", "DTP", "Hospital","NGO", "Prevention", "SMT", "Survey", "Network Scale-up")
+
+  for(group in 1:7)
+  {
+
+      
+      chain = chains[[group]]
+      
+      RateEstimates = apply(chain$pi, MARGIN = c(2,3), FUN = median)#colMeans(chain$pi)
+      label = paste(groups[group], " removed", sep = "")
+      
+      plot(RateEstimates[1,], type="l", ylim = c(0, .04), main = label, ylab = "Rate estimate", xlab = "Year", axes = F)
+
+      for(i in 2:27)
+      {
+          lines(RateEstimates[i,], type="l")
+      }
+
+      axis(1, at=1:9, labels=2007:2015)
+      axis(2, at=(0:2)*.02,labels = round((0:2)*.02, digits = 2),las=2)
+  }
+
+
+  dev.off()
+
+  
+
+#+END_SRC
+
+** Site
+
+#+BEGIN_SRC R
+
+   rm(chains)
+   rm(currents)
+   
+                                        #Each Site in turn
+      
+   for(i in 1:data$numSites)
+   {
+          data2 = data
+          data2$phat[i,,] = NA
+          data2$Y[i,,] = NA
+          data2$n[i,,] = NA
+          data2$NSU[i,] = NA
+          data2$D[i,] = NA
+  
+          results = runMCMC(data2, current3 , .4, 10000, 10,10000 )
+          chain = results$chain
+          current = results$current
+
+          save(chain, current, file = paste("./site", i ,"CV.RDATA",sep = ""))
+   }
+
+
+   newMults = array(NA, dim = c(length(chain$theta),data$numSites, data$numLists, data$numYears) )
+   newNSUs = array(NA, dim = c(length(chain$theta),data$numSites, data$numYears) )
+
+   
+   for(i in 1: data$numSites)
+   {
+       load(paste("./site", i ,"CV.RDATA",sep = "") )
+       
+       newPi = array(NA, dim = c(length(chain$theta), data$numYears) )
+       newPi[,1] = invlogit(rnorm(length(chain$theta), chain$mu0, sqrt(chain$sigmaSq0) ))
+
+       for(t in 2:data$numYears)
+       {
+           newPi[,t] = exp(log(newPi[,t-1]) + chain$yearTrend[,t] + rnorm(length(chain$theta), mean = 0, sd = sqrt(chain$sigmaPiSq) ) )
+       }
+
+       newN = newPi*data$R[i,]
+       
+       newDelta = rnorm(length(chain$theta), mean = 0)
+
+       for(t in 1:data$numYears)
+           newNSUs[,i,t] = exp(rnorm(length(chain$theta), log(newN[,t]) + chain$mu , sqrt(data$R[i,t]/(newN[,t]*data$D[i,t]))  ))
+       
+       for(j in 1:data$numLists)
+       {
+           for(t in 1:data$numYears)
+               newMults[,i,j,t] = exp(rnorm( length(chain$theta), log(newN[,t]) + chain$theta + newDelta + chain$gamma[,j], sqrt(sigmaESq/data$n[i,j,t]  ) ))            
+       }
+
+   }
+
+   save(newMults, newNSUs , file = paste("newCV.RDATA",sep = ""))
+
+   nsu.est = log(data$NSU)
+   mult.est = log(data$Y/data$phat)
+
+   setEPS()
+   postscript("./plots/predictions.eps", height = 3, width = 6)
+   
+   par(mfrow=c(1,2),mex=0.5, mai=c(0.5,0.5,0.2,0.2))
+   plot( colMeans(log(newMults)), mult.est, ylab = "Observed log multiplier estimate", xlab = "Predicted log multiplier estimate")
+   abline(a = 0, b=1)
+
+
+   plot( colMeans(log(newNSUs)),nsu.est, ylab = "Observed log NSU estimate", xlab = "Predicted log NSU estimate")
+   abline(a = 0, b=1)
+   dev.off()
+
+   cor(colMeans(log(newMults)), mult.est, use = "pairwise.complete")
+   cor(colMeans(log(newNSUs)), nsu.est, use = "pairwise.complete")
+
+   lower = apply(log(newMults), MARGIN = c(2,3,4), FUN = quantile, probs = c(.025), na.rm = TRUE)
+   upper = apply(log(newMults), MARGIN = c(2,3,4), FUN = quantile, probs = c(.975), na.rm = TRUE)
+
+   mean(lower < mult.est & upper > mult.est, na.rm = TRUE)
+
+   lower = apply(log(newNSUs), MARGIN = c(2,3), FUN = quantile, probs = c(.025), na.rm = TRUE)
+   upper = apply(log(newNSUs), MARGIN = c(2,3), FUN = quantile, probs = c(.975), na.rm = TRUE)
+
+   mean(lower < nsu.est & upper > nsu.est, na.rm = TRUE)
+
+   
+
+  
+#+END_SRC
+
+* Posterior Predictive Checks
+
+#+BEGIN_SRC R
+
+  load("mainChains.RDATA")
+
+  postpred = samplePosteriorPredicitve(data, chain)
+
+  postpred$phat
+
+  #Simulated.Mean.By.List = apply(log(aperm(replicate(length(postpred$phat[,1,1,1]), data$Y), c(4,1,2,3) )/postpred$phat), MARGIN = c(1,3), mean, na.rm = TRUE)
+  #Mean.By.List = apply(log(data$Y/data$phat), MARGIN = c(2), mean, na.rm = TRUE)
+
+  Simulated.Mean.By.List = apply((aperm(replicate(length(postpred$phat[,1,1,1]), data$Y), c(4,1,2,3) )/postpred$phat), MARGIN = c(1,3), mean, na.rm = TRUE)
+  Mean.By.List = apply((data$Y/data$phat), MARGIN = c(2), mean, na.rm = TRUE)
+
+  groups = c( "DTF", "DTP","Hospital", "NGO", "Prevention", "SMT", "Survey", "Network Scale-up")
+  
+  setEPS()
+  postscript("phatPostPred1.eps", height = 7, width = 5.5)
+  par(mfrow=c(4,2), lwd=.9,mex=0.5, mai=c(0.3,0.3,0.1,0.1))
+  for(j in 1:4)
+  {
+      hist(Simulated.Mean.By.List[,j], main = paste("Mean log estimate based on ", groups[j] ,sep = ""), xlab = "", ylab = " ",breaks=c((0:31)*1000,max(Simulated.Mean.By.List[,j])), freq=FALSE, xlim = c(0, 31000))
+      abline(v = Mean.By.List[j],lwd=4)
+  }
+
+  for(j in 5:7)
+  {
+      hist(Simulated.Mean.By.List[,j], main = paste("Mean log estimate based on ", groups[j] ,sep = ""), xlab = "", ylab =" ",breaks=c((0:31)*1000,max(Simulated.Mean.By.List[,j])),freq = FALSE, xlim = c(0, 31000))
+      abline(v = Mean.By.List[j],lwd=4)
+  }
+
+
+  hist(rowMeans(postpred$NSU,na.rm=TRUE), main = "Mean log NSU estimate", xlab = "" , ylab =" ",breaks=c((0:31)*1000,max(rowMeans(postpred$NSU,na.rm=TRUE))),freq = FALSE, xlim = c(0, 31000))
+  abline(v = mean(data$NSU, na.rm=TRUE),lwd = 4)
+  dev.off()
+
+  
+
+#+END_SRC
+
+* Simulations
+
+** Constant Bias
+*** Sim Function
+#+BEGIN_SRC R
+
+  simFromVarParameters.nonconstant = function(data, parameters, p = NULL)
+  {
+      numYears = data$numYears
+      numSites = data$numSites
+      numLists = data$numLists
+
+      R = data$R
+      n = data$n
+      D = data$D
+      Y = data$Y
+      
+      pi = matrix(NA, nrow = numSites, ncol = numYears )      
+      N = matrix(NA, nrow = numSites, ncol = numYears )
+      NSU = matrix(NA, nrow = numSites, ncol = numYears )
+      Y = array(NA, dim = c(numSites, numLists, numYears))
+      phat = array(NA, dim = c(numSites, numLists, numYears))
+
+      mu0 = rnorm(1 , logit(.1), .5)
+      sigmaPiSq = parameters$sigmaPiSq
+      sigmaSq.yearTrend = parameters$sigmaSq.yearTrend
+      sigmaESq = parameters$sigmaESq
+      SigmaDeltaSq = parameters$sigmaDeltaSq
+      SigmaGammaSq = parameters$sigmaGammaSq
+      sigmaC = parameters$sigmaC
+      sigmaSq0 = parameters$sigmaSq0
+      
+      mu = rnorm(1)
+      yearTrend = rnorm(numYears, 0, sqrt(sigmaSq.yearTrend) )
+      yearTrend[1] = 0
+ 
+      theta = -mu#rnorm(1, sd = .5)      
+      delta = rnorm(numSites,0, sqrt(SigmaDeltaSq) )
+      gamma = rnorm(numLists,0, sqrt(SigmaGammaSq) )
+      c = rnorm(numYears,0, sigmaC)
+      
+      pi[,1] = invlogit(rnorm(numSites,mu0, sqrt(sigmaSq0) ))
+      N[,1] = R[,1]*pi[,1]
+      NSU[,1] = exp(rnorm(numSites, log(N[,1]) + mu, sqrt(R[,1]/(N[,1]*D[,1]))  ))
+      
+      if(is.null(p))
+      {
+          p2 = array(NA, dim = c(numSites, numLists, numYears))
+      }
+      
+      for(list in 1:numLists)
+      {
+          if(is.null(p))
+          {
+              Y[,list,1] = data$Y[,list,1]
+              p2[,list,1] = data$Y[,list,1] / N[,1]
+              phat[,list,1] = exp(rnorm(numSites, log(p2[,list,1]) - theta - delta - gamma[list] - c[1], sd = sqrt(sigmaESq/n[,list,1]  )  ))
+          }
+          else
+          {
+              Y[,list,1] = round(N[,1]*p[,list,1])
+              p[,list,1] = Y[,list,1] / N[,1]
+              phat[,list,1] = exp(rnorm(numSites, log(p[,list,1]) - theta - delta - gamma[list] - c[1], sd = sqrt(sigmaESq/n[,list,1]  )  ))
+          }          
+          
+          
+      }
+      
+      for(year in 2:numYears)
+      {
+
+          pi[,year] = invlogit( rnorm(numSites , mean = logit(pi[,year - 1]) + yearTrend[year], sqrt(sigmaPiSq) )  )
+          N[,year] =  R[,year]*pi[,year]
+          NSU[,year] = exp(rnorm(numSites, log(N[,year]) + mu, sqrt(R[,year]/(N[,year]*D[,year]))  ))
+          
+          for(list in 1:numLists )
+          {
+              if(is.null(p))
+              {
+                  Y[,list,year] = data$Y[,list,year]
+                  p2[,list,year] = data$Y[,list,year] / N[,year]
+                  phat[,list,year] = exp(rnorm(numSites, log(p2[,list,year]) - theta - delta - gamma[list] - c[year], sd = sqrt(sigmaESq/n[,list,year]  )  ))
+              }
+              else
+              {
+                  Y[,list,year] = round(N[,year]*p[,list,year])
+                  p[,list,year] = Y[,list,year] / N[,year]
+                  phat[,list,year] = exp(rnorm(numSites, log(p[,list,year]) - theta - delta - gamma[list] - c[year], sd = sqrt(sigmaESq/n[,list,year]  )  ))
+              }          
+
+              
+          }
+      }
+
+      if(is.null(p))
+          p = p2
+      
+      parameters = list("mu0" = mu0,
+                        "sigmaSq0" = sigmaSq0,
+                        "pi" = pi,
+                        "sigmaPiSq" = sigmaPiSq,
+                        "yearTrend" = yearTrend,
+                        "sigmaSq.yearTrend" = sigmaSq.yearTrend,
+                        "sigmaNSq" = R/(N*D), # works
+                        "mu" = mu,
+                        "p" = p,
+                        "theta" = theta,
+                        "gamma" = gamma,
+                        "delta" = delta,
+                        "sigmaC" = sigmaC,
+                        "c" = c,
+                        "sigmaGammaSq" = SigmaGammaSq,
+                        "sigmaDeltaSq" = SigmaDeltaSq, 
+                        "sigmaESq" = sigmaESq, 
+                        "N" = N
+                        )
+
+      
+      data = list("R" = R,
+                  "Y" = Y,
+                  "phat" = phat,
+                  "NSU" = NSU,
+                  "D" = D,
+                  "n" = n,
+                  "numSites" = numSites,
+                  "numLists" = numLists,
+                  "numYears" = numYears
+                  )
+
+      return( list("data" = data, "parameters" = parameters) )
+
+  }
+  
+#+END_SRC
+
+*** Sim Study
+
+#+BEGIN_SRC R
+  
+  NumSamples = 300
+  NC = 5
+  
+  numYears = 4
+  numSites = 20
+  numLists = 4
+
+  sigmaC = 0:NC*.2
+  RelativeError = matrix(NA, nrow = NumSamples, ncol = c(NC+1))
+
+  c = array(NA, dim = c(NC + 1, NumSamples, numYears) )
+  N = array(NA, dim = c(NC + 1, NumSamples, numSites, numYears) )
+  pi = array(NA, dim = c(NC + 1, NumSamples, numSites, numYears) )
+  Nhat = array(NA, dim = c(NC + 1, NumSamples, numSites, numYears) )
+  logNhat = array(NA, dim = c(NC + 1, NumSamples, numSites, numYears) )
+  Nhat.lower = array(NA, dim = c(NC + 1, NumSamples, numSites,numYears) )
+  Nhat.upper = array(NA, dim = c(NC + 1, NumSamples, numSites,numYears) )
+  pihat = array(NA, dim = c(NC + 1, NumSamples, numSites, numYears) )
+  logpihat = array(NA, dim = c(NC + 1, NumSamples, numSites, numYears) )
+  pihat.lower = array(NA, dim = c(NC + 1, NumSamples, numSites,numYears) )
+  pihat.upper = array(NA, dim = c(NC + 1, NumSamples, numSites,numYears) )
+  yearTrend = array(NA, dim = c(NC + 1, NumSamples, numYears) )
+  
+  
+  for(b in 1:(NC+1) )
+  {
+      for(a in 1:NumSamples)
+      {
+          print(paste(b,a,sep=" - "))
+          print( timestamp() )
+
+          
+          data.temp = list("R" = matrix(1:numSites * 20000, nrow = numSites, ncol = numYears ),
+                           "Y" = array(NA, dim = c(numSites,numLists, numYears)),
+                           "phat" = array(NA, dim = c(numSites, numLists, numYears)),
+                           "NSU" = matrix(NA, nrow = numSites, ncol = numYears ),
+                           "D" = matrix(300, nrow = numSites, ncol = numYears ),
+                           "n" = round(array(runif(numYears*numSites*numLists, min = 100, max = 500), dim = c(numSites, numLists, numYears))),
+                           "numSites" = numSites,
+                           "numLists" = numLists,
+                           "numYears" = numYears
+                           )
+
+          
+          parameters = list("sigmaSq0" = .3^2,
+                            "sigmaPiSq" = runif(1,0,1),
+                            "sigmaSq.yearTrend" = runif(1,0,1),
+                            "sigmaDeltaSq" = runif(1,0,1),
+                            "sigmaGammaSq" = runif(1,0,1),
+                            "sigmaC" = sigmaC[b],
+                            "sigmaESq" = runif(1,200,500),
+                            "n" = round(array(runif(numYears*numSites*numLists, min = 100, max = 500), dim = c(numSites, numLists, numYears)))
+                            )
+
+          sim = simFromVarParameters.nonconstant(data.temp, parameters, p = array(runif(numYears*numSites*numLists, max = .3, min = .001 ), dim = c(numSites, numLists, numYears)) )
+          parameters = sim$parameters
+          data.temp = sim$data
+          data.temp$NSU[,-3] = NA
+          data.temp$D[,-3] = NA
+          data.temp$phat[,,3] = NA
+          data.temp$Y[,,3] = NA
+          data.temp$n[,,3] = NA
+          
+          ## Fit model
+          sink("/dev/null") 
+          results = runMCMC(data.temp, parameters , .5, 7000, 1,10 )
+          chain = results$chain
+          sink()
+          
+          c[b,a,] = parameters$c
+          N[b,a,,] = parameters$N
+          Nhat[b,a,,] = colMeans(chain$N)
+          logNhat[b,a,,] = colMeans(log(chain$N))
+          Nhat.lower[b,a,,] = apply(chain$N, MARGIN = c(2,3), FUN = quantile, probs = c(.025))
+          Nhat.upper[b,a,,] = apply(chain$N, MARGIN = c(2,3), FUN = quantile, probs = c(.975))
+          pi[b,a,,] = parameters$pi
+          pihat[b,a,,] = colMeans(chain$pi)
+          logpihat[b,a,,] = colMeans(log(chain$pi))
+          pihat.lower[b,a,,] = apply(chain$pi, MARGIN = c(2,3), FUN = quantile, probs = c(.025))
+          pihat.upper[b,a,,] = apply(chain$pi, MARGIN = c(2,3), FUN = quantile, probs = c(.975))
+          yearTrend[b,a,] = colMeans(chain$yearTrend)
+
+          print(sqrt(mean((colMeans(log(chain$N)) - log(parameters$N))^2))/log(10))
+      }
+  }
+
+  
+
+
+  library(plotrix)
+  library(ggplot2)
+
+  plot.data = data.frame("RelativeError" = apply(RelativeError, MARGIN = 1, FUN = mean),
+                         "upperLogError" = apply(log(N) - logNhat, MARGIN = 1, FUN = mean) + 1.96*apply((log(N) - logNhat) , MARGIN = c(1), FUN = sd)/20 ,
+                         "lowerLogError" = apply(log(N) - logNhat, MARGIN = 1, FUN = mean) - 1.96*apply((log(N) - logNhat) , MARGIN = c(1), FUN = sd)/20 ,
+                         "logError" = apply(log(N) - logNhat, MARGIN = 1, FUN = mean),
+                         "upperLogError" = apply(log(N) - logNhat, MARGIN = 1, FUN = mean) + 1.96*apply((log(N) - logNhat) , MARGIN = c(1), FUN = sd)/20 ,
+                         "lowerLogError" = apply(log(N) - logNhat, MARGIN = 1, FUN = mean) - 1.96*apply((log(N) - logNhat) , MARGIN = c(1), FUN = sd)/20 ,
+                         "Nhat" = Nhat,
+                         "N" = N,
+                         "sigmaC" = sigmaC)
+
+  plot(apply(RelativeError^2, MARGIN =  c(1), FUN = mean ))
+
+  
+  ggplot(data=plot.data, aes(x=factor(sigmaC), y=RelativeError )) +
+      geom_boxplot() 
+
+  logError = (log(N) - logNhat)
+
+  hist( logError[1,,1,1], xlim = c(-2,2),freq=FALSE )
+  hist( logError[2,,1,1], xlim = c(-2,2),freq=FALSE )
+  hist( logError[3,,1,1], xlim = c(-2,2),freq=FALSE )
+  hist( logError[4,,1,1], xlim = c(-2,2),freq=FALSE )
+
+  RelativeError = (N - Nhat)/N
+  par(mfrow = c(2,2))
+  hist( apply(RelativeError[1,,,], MARGIN = c(2,3), FUN = mean), xlim = c(-.2,.2),freq=FALSE, breaks = c(-Inf, .01*((-20):20),Inf  ) )
+  hist( apply(RelativeError[2,,,], MARGIN = c(2,3), FUN = mean), xlim = c(-.2,.2),freq=FALSE, breaks = c(-Inf, .01*((-20):20),Inf  ) )
+  hist( apply(RelativeError[3,,,], MARGIN = c(2,3), FUN = mean), xlim = c(-.2,.2),freq=FALSE, breaks = c(-Inf, .01*((-20):20),Inf  ) )
+  hist( apply(RelativeError[4,,,], MARGIN = c(2,3), FUN = mean), xlim = c(-.2,.2),freq=FALSE, breaks = c(-Inf, .01*((-20):20),Inf  ) )
+
+
+  
+  hist(  , xlim = c(-2,2),freq=FALSE )
+
+  RelativeError = (N - Nhat)/N
+  plot(sigmaC, apply(sqrt(RelativeError^2), MARGIN = c(1), FUN = median) ,type = "b")
+  plot(sigmaC, apply(RelativeError, MARGIN = c(1), FUN = median) ,type = "b")
+
+
+  par(mfrow = c(1,2))
+  
+  logError = (log(Nhat) - log(N))/log(10)
+  plot(sigmaC, apply(sqrt(logError^2), MARGIN = c(1), FUN = mean) ,type = "b", ylim = c(.1,.3))
+  points(sigmaC, apply(apply(sqrt(logError^2), MARGIN = c(1,3,4), FUN = mean), MARGIN = c(1), FUN = quantile, probs = .025) ,type = "b", lty = "dashed")
+  points(sigmaC, apply(apply(sqrt(logError^2), MARGIN = c(1,3,4), FUN = mean), MARGIN = c(1), FUN = quantile, probs = .975) ,type = "b", lty = "dashed")
+
+  plot(sigmaC, apply(logError, MARGIN = c(1), FUN = median) ,type = "b", ylim = c(-.2, .05))
+  points(sigmaC, apply(apply(logError, MARGIN = c(1,3,4), FUN = median), MARGIN = c(1), FUN = quantile, probs = .025) ,type = "b", lty = "dashed")
+  points(sigmaC, apply(apply(logError, MARGIN = c(1,3,4), FUN = median), MARGIN = c(1), FUN = quantile, probs = .975) ,type = "b", lty = "dashed")
+
+  
+  save.image("./nonconstant.RDATA")
+    
+#+END_SRC
+
+** Additive Bias 
+
+*** Sim Function
+#+BEGIN_SRC R
+
+  simFromVarParameters.nonadditive = function(data, parameters, p = NULL)
+  {
+      numYears = data$numYears
+      numSites = data$numSites
+      numLists = data$numLists
+
+      R = data$R
+      n = data$n
+      D = data$D
+      Y = data$Y
+      
+      pi = matrix(NA, nrow = numSites, ncol = numYears )      
+      N = matrix(NA, nrow = numSites, ncol = numYears )
+      NSU = matrix(NA, nrow = numSites, ncol = numYears )
+      Y = array(NA, dim = c(numSites, numLists, numYears))
+      phat = array(NA, dim = c(numSites, numLists, numYears))
+
+      sigmaSq0= parameters$sigmaSq0
+      sigmaPiSq = parameters$sigmaPiSq
+      sigmaSq.yearTrend = parameters$sigmaSq.yearTrend
+      sigmaESq = parameters$sigmaESq
+      SigmaDeltaSq = parameters$sigmaDeltaSq
+      SigmaGammaSq = parameters$sigmaGammaSq
+      sigmaC = parameters$sigmaC
+      
+      mu = rnorm(1)
+      mu0 = rnorm(1 ,logit(.1), .5)
+      yearTrend = rnorm(numYears, 0, sqrt(sigmaSq.yearTrend) )
+      yearTrend[1] = 0
+ 
+      theta = -mu#rnorm(1)      
+      delta = rnorm(numSites,0, sqrt(SigmaDeltaSq) )
+      gamma = rnorm(numLists,0, sqrt(SigmaGammaSq) )
+      c = matrix(rnorm(numSites*numLists,0, sigmaC), nrow = numSites, ncol = numLists )
+      
+      pi[,1] = invlogit(rnorm(numSites, mu0, sqrt(sigmaSq0)  ))
+      N[,1] = R[,1]*pi[,1]
+      NSU[,1] = exp(rnorm(numSites, log(N[,1]) + mu , sqrt(R[,1]/(N[,1]*D[,1]))  ))
+      
+      if(is.null(p))
+      {
+          p2 = array(NA, dim = c(numSites, numLists, numYears))
+      }
+      
+      for(list in 1:numLists)
+      {
+          if(is.null(p))
+          {
+              Y[,list,1] = data$Y[,list,1]
+              p2[,list,1] = data$Y[,list,1] / N[,1]
+              phat[,list,1] = exp(rnorm(numSites, log(p2[,list,1]) - theta - delta - gamma[list] - c[,list], sd = sqrt(sigmaESq/n[,list,1]  )  ))
+          }
+          else
+          {
+              Y[,list,1] = round(N[,1]*p[,list,1])
+              p[,list,1] = Y[,list,1] / N[,1]
+              phat[,list,1] = exp(rnorm(numSites, log(p[,list,1]) - theta - delta - gamma[list] - c[,list], sd = sqrt(sigmaESq/n[,list,1]  )  ))
+          }          
+          
+          
+      }
+      
+      for(year in 2:numYears)
+      {
+
+          pi[,year] = invlogit( rnorm(numSites , mean = logit(pi[,year - 1]) + yearTrend[year], sqrt(sigmaPiSq) )  )
+          N[,year] =  R[,year]*pi[,year]
+          NSU[,year] = exp(rnorm(numSites, log(N[,year]) + mu , sqrt(R[,year]/(N[,year]*D[,year]))  ))
+          
+          for(list in 1:numLists )
+          {
+              if(is.null(p))
+              {
+                  Y[,list,year] = data$Y[,list,year]
+                  p2[,list,year] = data$Y[,list,year] / N[,year]
+                  phat[,list,year] = exp(rnorm(numSites, log(p2[,list,year]) - theta - delta - gamma[list] - c[,list], sd = sqrt(sigmaESq/n[,list,year]  )  ))
+              }
+              else
+              {
+                  Y[,list,year] = round(N[,year]*p[,list,year])
+                  p[,list,year] = Y[,list,year] / N[,year]
+                  phat[,list,year] = exp(rnorm(numSites, log(p[,list,year]) - theta - delta - gamma[list] - c[,list], sd = sqrt(sigmaESq/n[,list,year]  )  ))
+              }          
+
+              
+          }
+      }
+
+      if(is.null(p))
+          p = p2
+      
+      parameters = list("mu0" = mu0,
+                        "sigmaSq0" = sigmaSq0,
+                        "pi" = pi,
+                        "sigmaPiSq" = sigmaPiSq,
+                        "yearTrend" = yearTrend,
+                        "sigmaSq.yearTrend" = sigmaSq.yearTrend,
+                        "sigmaNSq" = R/(N*D), # works
+                        "mu" = mu,
+                        "p" = p,
+                        "theta" = theta,
+                        "gamma" = gamma,
+                        "delta" = delta,
+                        "sigmaC" = sigmaC,
+                        "c" = c,
+                        "sigmaGammaSq" = SigmaGammaSq,
+                        "sigmaDeltaSq" = SigmaDeltaSq, 
+                        "sigmaESq" = sigmaESq, 
+                        "N" = N
+                        )
+
+      
+      data = list("R" = R,
+                  "Y" = Y,
+                  "phat" = phat,
+                  "NSU" = NSU,
+                  "D" = D,
+                  "n" = n,
+                  "numSites" = numSites,
+                  "numLists" = numLists,
+                  "numYears" = numYears
+                  )
+
+      return( list("data" = data, "parameters" = parameters) )
+
+  }
+  
+#+END_SRC
+
+*** Sim Study
+
+#+BEGIN_SRC R
+  
+  NumSamples = 300
+  NY = 5
+  
+  numYears = 3
+  numSites = 20
+  numLists = 4
+
+  sigmaC = 0:NY*.2
+  RelativeError = matrix(NA, nrow = NumSamples, ncol = c(NC+1))
+
+  c = array(NA, dim = c(NY + 1, NumSamples, numSites, numLists) )
+  N = array(NA, dim = c(NY + 1, NumSamples, numSites, numYears) )
+  pi = array(NA, dim = c(NY + 1, NumSamples, numSites, numYears) )
+  Nhat = array(NA, dim = c(NY + 1, NumSamples, numSites, numYears) )
+  logNhat = array(NA, dim = c(NY + 1, NumSamples, numSites, numYears) )
+  Nhat.lower = array(NA, dim = c(NY + 1, NumSamples, numSites,numYears) )
+  Nhat.upper = array(NA, dim = c(NY + 1, NumSamples, numSites,numYears) )
+  pihat = array(NA, dim = c(NY + 1, NumSamples, numSites, numYears) )
+  logpihat = array(NA, dim = c(NY + 1, NumSamples, numSites, numYears) )
+  pihat.lower = array(NA, dim = c(NY + 1, NumSamples, numSites,numYears) )
+  pihat.upper = array(NA, dim = c(NY + 1, NumSamples, numSites,numYears) )
+  
+  
+  for(b in 1:(NY+1) )
+  {
+      for(a in 1:NumSamples)
+      {
+
+          print(paste(b,a,sep=" - "))
+          timestamp() 
+
+          data.temp = list("R" = matrix(1:numSites * 20000, nrow = numSites, ncol = numYears ),
+                           "Y" = array(NA, dim = c(numSites,numLists, numYears)),
+                           "phat" = array(NA, dim = c(numSites, numLists, numYears)),
+                           "NSU" = matrix(NA, nrow = numSites, ncol = numYears ),
+                           "D" = matrix(300, nrow = numSites, ncol = numYears ),
+                           "n" = round(array(runif(numYears*numSites*numLists, min = 100, max = 500), dim = c(numSites, numLists, numYears))),
+                           "numSites" = numSites,
+                           "numLists" = numLists,
+                           "numYears" = numYears
+                           )
+
+          
+          parameters = list("sigmaSq0" = .3^2,
+                            "sigmaPiSq" = runif(1,0,1),
+                            "sigmaSq.yearTrend" = runif(1,0,1),
+                            "sigmaDeltaSq" = runif(1,0,1),
+                            "sigmaGammaSq" = runif(1,0,1),
+                            "sigmaC" = sigmaC[b],
+                            "sigmaESq" = runif(1,200,500),
+                            "n" = round(array(runif(numYears*numSites*numLists, min = 100, max = 500), dim = c(numSites, numLists, numYears)))
+                            )
+          
+          sim = simFromVarParameters.nonadditive(data.temp, parameters, p = array(runif(numYears*numSites*numLists, max = .3, min = .001 ), dim = c(numSites, numLists, numYears)) )
+          parameters = sim$parameters
+          data.temp = sim$data
+          data.temp$NSU[,-3] = NA
+          data.temp$D[,-3] = NA
+          data.temp$phat[,,3] = NA
+          data.temp$Y[,,3] = NA
+          data.temp$n[,,3] = NA
+
+                    
+          ## Fit model
+          sink("/dev/null") 
+          results = runMCMC(data.temp, parameters , .2, 8000, 1,10 )
+          chain = results$chain
+          sink()
+          
+          c[b,a,,] = parameters$c
+          N[b,a,,] = parameters$N
+          Nhat[b,a,,] = colMeans(chain$N)
+          logNhat[b,a,,] = colMeans(log(chain$N))
+          Nhat.lower[b,a,,] = apply(chain$N, MARGIN = c(2,3), FUN = quantile, probs = c(.025))
+          Nhat.upper[b,a,,] = apply(chain$N, MARGIN = c(2,3), FUN = quantile, probs = c(.975))
+          pi[b,a,,] = parameters$pi
+          pihat[b,a,,] = colMeans(chain$pi)
+          logpihat[b,a,,] = colMeans(log(chain$pi))
+          pihat.lower[b,a,,] = apply(chain$pi, MARGIN = c(2,3), FUN = quantile, probs = c(.025))
+          pihat.upper[b,a,,] = apply(chain$pi, MARGIN = c(2,3), FUN = quantile, probs = c(.975))
+
+          print(sqrt(mean((colMeans(log(chain$N)) - log(parameters$N))^2))/log(10))          
+      }
+  }
+
+  RelativeError = (N - Nhat)/N
+
+  plot(apply(sqrt(RelativeError^2), MARGIN = 1, FUN = mean))
+  plot(apply(sqrt(RelativeError^2), MARGIN = c(1,3,4), FUN = mean))
+
+  plot(apply(RelativeError, MARGIN = 1, FUN = mean))
+
+  apply(RelativeError, MARGIN = c(1,3,4), FUN = mean)
+  apply(RelativeError, MARGIN = c(1,3,4), FUN = sd)/sqrt(200)
+
+  apply(RelativeError, MARGIN = c(1,3,4), FUN = mean)
+  apply(RelativeError, MARGIN = c(1,3,4), FUN = sd)/sqrt(200)
+
+  save.image("nonadditive.RDATA")
+
+
+  plot(sigmaC, apply(apply(abs(logError), MARGIN = c(1,3,4), FUN = median), MARGIN = c(1), FUN = mean) ,type = "b",ylim = c(.05, .35))
+  points(sigmaC, apply(sqrt(apply((logError^2), MARGIN = c(1,3,4), FUN = median)), MARGIN = c(1), FUN = quantile, probs = .025) ,type = "b", lty = "dashed")
+  points(sigmaC, apply(sqrt(apply((logError^2), MARGIN = c(1,3,4), FUN = median)), MARGIN = c(1), FUN = quantile, probs = .975) ,type = "b", lty = "dashed")
+
+
+  
+  load("nonadditive.RDATA")
+  sigmaC = 0:NY*.2
+  logError = (log(Nhat) - log(N))/log(10)
+  
+  postscript("./plots/nonadditive.eps", height = 5, width = 9)
+  par(mfrow=c(1,2), las = 0,mex=0.5, mai=c(0.5,0.5,0.2,0.2))
+  plot(sigmaC, apply(logError, MARGIN = c(1), FUN = median) ,type = "b", ylim = c(-.7, .7),
+       xlab = "SD of non-additive bias terms", ylab = "Log (base 10) error in estimating population size")
+  points(sigmaC, apply(logError, MARGIN = c(1), FUN = quantile, probs = .025, na.rm =TRUE) ,type = "b", lty = "dashed")
+  points(sigmaC, apply(logError, MARGIN = c(1), FUN = quantile, probs = .975, na.rm =TRUE) ,type = "b", lty = "dashed")
+  points(sigmaC, apply(apply(logError, MARGIN = c(1,2), FUN = median), MARGIN = c(1), FUN = quantile, probs = .95 ) ,type = "b", lty = "dotted")
+  points(sigmaC, apply(apply(logError, MARGIN = c(1,2), FUN = median), MARGIN = c(1), FUN = quantile, probs = .05 ) ,type = "b", lty = "dotted")
+
+   
+  plot(sigmaC, apply(sqrt(apply((logError)^2, MARGIN = c(1,2,3), FUN = mean)), MARGIN = c(1), FUN = median ) ,type = "b", ylim = c(0, .6),
+       xlab = "SD of non-additive bias terms", ylab = "RMSE")
+  points(sigmaC, apply(sqrt(apply((logError)^2, MARGIN = c(1,2,3), FUN = mean)), MARGIN = c(1), FUN = quantile, probs = .975 ) ,type = "b", lty = "dashed")
+  points(sigmaC, apply(sqrt(apply((logError)^2, MARGIN = c(1,2,3), FUN = mean)), MARGIN = c(1), FUN = quantile, probs = .75 ) ,type = "b", lty = "dotted")
+  points(sigmaC, apply(sqrt(apply((logError)^2, MARGIN = c(1,2,3), FUN = mean)), MARGIN = c(1), FUN = quantile, probs = .025 ) ,type = "b", lty = "dashed")
+  points(sigmaC, apply(sqrt(apply((logError)^2, MARGIN = c(1,2,3), FUN = mean)), MARGIN = c(1), FUN = quantile, probs = .25 ) ,type = "b", lty = "dotted")
+  dev.off()
+
+  load("nonconstant.RDATA")
+
+  logError = (log(Nhat) - log(N))/log(10)
+  
+  postscript("./plots/nonconstant.eps", height = 5, width = 9)
+  par(mfrow=c(1,2), las = 0,mex=0.5, mai=c(0.5,0.5,0.2,0.2))  
+  plot(sigmaC, apply(logError, MARGIN = c(1), FUN = median) ,type = "b", ylim = c(-1, .8),
+       xlab = "SD of non-constant bias terms", ylab = "Log (base 10) error in estimating population size")
+  points(sigmaC, apply(logError, MARGIN = c(1), FUN = quantile, probs = .025, na.rm =TRUE) ,type = "b", lty = "dashed")
+  points(sigmaC, apply(logError, MARGIN = c(1), FUN = quantile, probs = .975, na.rm =TRUE) ,type = "b", lty = "dashed")
+  points(sigmaC, apply(apply(logError, MARGIN = c(1,2), FUN = mean), MARGIN = c(1), FUN = quantile, probs = .95 ) ,type = "b", lty = "dotted")
+  points(sigmaC, apply(apply(logError, MARGIN = c(1,2), FUN = mean), MARGIN = c(1), FUN = quantile, probs = .05 ) ,type = "b", lty = "dotted")
+
+  plot(sigmaC, apply(sqrt(apply((logError)^2, MARGIN = c(1,2,3), FUN = mean)), MARGIN = c(1), FUN = median ) ,type = "b", ylim = c(0, .8),
+       xlab = "SD of non-constant bias terms", ylab = "RMSE")
+  points(sigmaC, apply(sqrt(apply((logError)^2, MARGIN = c(1,2,3), FUN = mean)), MARGIN = c(1), FUN = quantile, probs = .975 ) ,type = "b", lty = "dashed")
+  points(sigmaC, apply(sqrt(apply((logError)^2, MARGIN = c(1,2,3), FUN = mean)), MARGIN = c(1), FUN = quantile, probs = .75 ) ,type = "b", lty = "dotted")
+  points(sigmaC, apply(sqrt(apply((logError)^2, MARGIN = c(1,2,3), FUN = mean)), MARGIN = c(1), FUN = quantile, probs = .025 ) ,type = "b", lty = "dashed")
+  points(sigmaC, apply(sqrt(apply((logError)^2, MARGIN = c(1,2,3), FUN = mean)), MARGIN = c(1), FUN = quantile, probs = .25 ) ,type = "b", lty = "dotted")
+  dev.off()
+
+  library(hexbin)
+
+  N = N.3
+  Nhat = Nhat.3
+
+  yearMean = apply(logit( pi ), MARGIN = c(1,2,4), FUN = mean )
+  yearMean.obs = apply(logit( pihat ), MARGIN = c(1,2,4), FUN = mean )
+  obsYearTrend = yearMean.obs[-1,,-1] - yearMean.obs[-1,,-4]  
+  YearTrend = yearMean[-1,,-1] - yearMean[-1,,-4]
+
+  cor(c[-1,,-1], yearTrend[-1,,-1] - YearTrend)
+  plot(c[-1,,-1], yearTrend[-1,,-1] )
+
+  
+#+END_SRC
+
+* No Bias
+
+** Fit No bias model
+
+#+BEGIN_SRC R
+
+  chainBind = function(chainA, chainB)
+  {
+
+      
+      chain = list("mu0" = abind(chainA$mu0, chainB$mu0, along = 1),
+                   "sigmaSq0" = abind(chainA$sigmaSq0, chainB$sigmaSq0, along = 1),
+                   "pi" = abind(chainA$pi, chainB$pi, along = 1),
+                   "sigmaPiSq" = abind(chainA$sigmaPiSq, chainB$sigmaPiSq, along = 1),
+                   "N" =abind(chainA$N, chainB$N, along = 1),
+                   "p" = abind(chainA$p, chainB$p, along = 1),
+                   "sigmaNSq" = abind(chainA$sigmaNSq, chainB$sigmaNSq, along = 1),
+                   "sigmaGammaSq" = abind(chainA$sigmaGammaSq, chainB$sigmaGammaSq, along = 1),
+                   "sigmaDeltaSq" = abind(chainA$sigmaDeltaSq, chainB$sigmaDeltaSq, along = 1),
+                   "sigmaESq" = abind(chainA$sigmaESq, chainB$sigmaESq, along = 1),
+                   "sigmaSSq" = abind(chainA$sigmaSSq, chainB$sigmaSSq, along = 1),
+                   "mu" = abind(chainA$mu, chainB$mu, along = 1),
+                   "theta" = abind(chainA$theta, chainB$theta, along = 1),      
+                   "gamma" = abind(chainA$gamma, chainB$gamma, along = 1),
+                   "delta" = abind(chainA$delta, chainB$delta, along = 1),
+                   "yearTrend" = abind(chainA$yearTrend, chainB$yearTrend, along = 1),
+                   "sigmaSq.yearTrend" = abind(chainA$"sigmaSq.yearTrend", chainB$"sigmaSq.yearTrend", along = 1)
+                   )
+
+      return(chain)    
+  }
+  
+  
+  updateYearTrend = function(data, current)
+  {
+      yearTrend = current$yearTrend
+      
+      steps = logit(current$pi[,-1]) - logit(current$pi[,-data$numYears])
+      for(t in 2:numYears)
+      {
+          var = 1/(1/(current$sigmaSq.yearTrend) + numSites/current$sigmaPiSq )
+          coef = sum(steps[,t-1] )/current$sigmaPiSq
+          
+          yearTrend[t] = rnorm(n = 1, mean = var*coef, sd = sqrt(var)) #0
+      }
+      
+      return(yearTrend)
+  }
+
+  makeChain = function(data, length)
+  {
+      numSites = length(data$R[,1])
+      numLists = length(data$phat[1,,1])
+      numYears = length(data$R[1,])
+      
+      chain = list("mu0" = rep(NaN, length),
+                   "sigmaSq0" = rep(NaN, length),
+                   "pi" = array(NaN, dim = c(length, numSites, numYears)),
+                   "sigmaPiSq" = rep(NaN, length),             
+                   "N" = array(NaN, dim = c(length, numSites, numYears)),
+                   "p" = array(NaN, dim = c(length, numSites, numLists, numYears)),
+                   "sigmaNSq" = array(NaN, dim = c(length, numSites, numYears)),
+                   "sigmaGammaSq" = rep(NaN, length),
+                   "sigmaDeltaSq" = rep(NaN, length),
+                   "sigmaSSq" = rep(NaN, length),
+                   "sigmaESq" = rep(NaN, length),
+                   "mu" = rep(NaN, length),
+                   "theta" = rep(NaN, length),
+                   "gamma" = matrix(NaN, nrow = length, ncol = numLists),
+                   "delta" = matrix(NaN, nrow = length, ncol = numSites),
+                   "yearTrend" = matrix(NaN, nrow = length, ncol = numYears),
+                   "sigmaSq.yearTrend" = rep(NaN, length)
+                   )
+
+      return(chain)
+  }
+
+  initialize = function(data)
+  {
+      numSites = length(data$R[,1])
+      numLists = length(data$phat[1,,1])
+      numYears = length(data$R[1,])
+
+      
+      current = list("mu0" = 0,
+                     "sigmaSq0" = 1,
+                     "pi" = array(.3, dim = c(numSites, numYears)),
+                     "sigmaPiSq" = 1,             
+                     "N" = array(100000, dim = c(numSites, numYears) ),
+                     "p" = array(.5, dim = c(numSites, numLists, numYears)),
+                     "sigmaNSq" = array(20000, dim = c(numSites, numYears)),
+                     "sigmaGammaSq" = 1,
+                     "sigmaDeltaSq" = 1,
+                     "sigmaSSq" = 1,
+                     "sigmaESq" = 1,
+                     "mu" = 0,
+                     "theta" = 0,
+                     "gamma" = rep(0, numLists), 
+                     "delta" = rep(0, numSites),
+                     "yearTrend" = rep(0, numYears),
+                     "sigmaSq.yearTrend" = 0
+                     )
+
+      return(current)
+  }
+
+  logit = function(input)
+  {
+      return( log(input / (1 - input) ) )
+  }
+
+
+  invlogit = function(x)
+  {
+      return( 1 / (1 + exp(-x)) )
+  }
+
+  
+  updateSigmaPiSq = function(current, data)
+  {
+      yearTrend = current$yearTrend
+      numLists = data$numLists
+      numSites = data$numSites
+      numYears = data$numYears
+      
+      steps = logit(current$pi[,-1]) - logit(current$pi[,-numYears]) - matrix(yearTrend[-1], nrow = numSites, ncol = numYears-1, byrow = TRUE)
+      
+      sigmaPiSq = 1/rgamma(n=1, shape = 1 + length(steps)/2 , rate = .001 + sum ( (steps)^2 )/2 )
+
+      return(sigmaPiSq)
+  }
+
+  
+  updatePiN = function(current, data,tune)
+  {
+      numSites = length(data$R[,1])
+      numLists = length(data$phat[1,,1])
+      numYears = length(data$R[1,])
+
+      yearTrend = current$yearTrend
+
+      Nnew = current$N
+      pinew = current$pi
+
+      ## When do we have no data?
+      Ypresent = apply(!is.na(data$Y), MARGIN = c(1,3), FUN = max)
+      NSUpresent = !is.na(data$NSU)
+
+      ##Four Cases
+      NoData = !Ypresent & !NSUpresent
+      OnlyY = Ypresent & !NSUpresent
+      OnlyNSU = !Ypresent & NSUpresent
+      Both = Ypresent & NSUpresent
+
+      ## Generate Proposal Value
+      piprev = current$pi
+      Nprev = current$pi*data$R
+      logitpiprev = logit(piprev)
+
+      logitpiprop = logitpiprev + rnorm(length(piprev), mean = 0, sd = tune)
+      piprop = invlogit(logitpiprop)        
+      Nprop = piprop*data$R
+      
+      ## Update First Year
+      year = 1
+
+      part1 = dnorm(log(data$NSU[,year]), mean = log(Nprop[,year]) + current$mu, sd = sqrt(data$R[,year] / (data$D[,year] * Nprop[,year] )), log = TRUE)
+      part1[is.na(part1)] = 0
+
+      part2 = rowSums(dnorm(log(data$Y[,,year]/data$phat[,,year]), mean = matrix(log(Nprop[,year]) + current$theta, nrow = numSites, ncol = numLists) +
+                                                                       matrix(current$delta, nrow = numSites, ncol = numLists ) +
+                                                                       matrix(current$gamma, nrow = numSites, ncol = numLists, byrow = TRUE),
+                            sd = sqrt(current$sigmaESq/data$n[,,year]), log = TRUE), na.rm = TRUE)
+      part2[is.na(part2)] = 0
+      
+      logTopPost = dnorm(logit(piprop[,year]), current$mu0, sqrt(current$sigmaSq0), log = TRUE) + #dbeta(piprop[,year], shape1 = current$alpha0, shape2 = current$beta0, log = TRUE) +
+          part1 +
+          part2 +
+          dnorm(logit(current$pi[,year+1]), mean = logitpiprop[,year] + yearTrend[year+1], sd = sqrt(current$sigmaPiSq), log = TRUE)
+
+      part1 = dnorm(log(data$NSU[,year]), mean = log(Nprev[,year]) + current$mu, sd = sqrt(data$R[,year] / (data$D[,year] * Nprev[,year] )), log = TRUE)
+      part1[is.na(part1)] = 0
+
+      part2 = rowSums(dnorm(log(data$Y[,,year]/data$phat[,,year]), mean = matrix(log(Nprev[,year]) + current$theta, nrow = numSites, ncol = numLists) +
+                                                                       matrix(current$delta, nrow = numSites, ncol = numLists ) +
+                                                                       matrix(current$gamma, nrow = numSites, ncol = numLists, byrow = TRUE),
+                            sd = sqrt(current$sigmaESq/data$n[,,year]), log = TRUE), na.rm = TRUE)
+      part2[is.na(part2)] = 0
+
+
+      logBottomPost = dnorm(logit(piprev[,year]), current$mu0, sqrt(current$sigmaSq0), log = TRUE) + #dbeta(piprev[,year], shape1 = current$alpha0, shape2 = current$beta0, log = TRUE) +
+          part1 +
+          part2 +
+          dnorm(logit(current$pi[,year+1]), mean = logitpiprev[,year] + yearTrend[year+1], sd = sqrt(current$sigmaPiSq), log = TRUE)
+
+
+      ## Calculate Acceptance Probability
+      prob = exp( logTopPost - logBottomPost)
+
+      ## Accept/Reject
+      U = runif(length(prob))
+
+      pinew[which(U < prob),year] = piprop[which(U < prob),year]
+      pinew[which(U >= prob),year] = piprev[which(U >= prob),year]
+
+      Nnew[which(U < prob),year] = Nprop[which(U < prob),year]
+      Nnew[which(U >= prob),year] = Nprev[which(U >= prob),year]
+
+      
+      ## Update Interior Years Prevalence
+      for(year in 2:(numYears-1) )
+      {
+          part1 = dnorm(log(data$NSU[,year]), mean = log(Nprop[,year]) + current$mu, sd = sqrt(data$R[,year] / (data$D[,year] * Nprop[,year] )), log = TRUE)
+          part1[is.na(part1)] = 0
+
+          part2 = rowSums(dnorm(log(data$Y[,,year]/data$phat[,,year]), mean = matrix(log(Nprop[,year]) + current$theta, nrow = numSites, ncol = numLists) +
+                                                                           matrix(current$delta, nrow = numSites, ncol = numLists ) +
+                                                                           matrix(current$gamma, nrow = numSites, ncol = numLists, byrow = TRUE),
+                                sd = sqrt(current$sigmaESq/data$n[,,year]), log = TRUE), na.rm = TRUE)
+          part2[is.na(part2)] = 0
+
+          logTopPost = part1 +
+              part2 +
+              dnorm(logit(current$pi[,year+1]), mean = logitpiprop[,year] + yearTrend[year+1], sd = sqrt(current$sigmaPiSq), log = TRUE) +
+              dnorm(logitpiprop[,year], mean = logit(pinew[,year-1]) + yearTrend[year], sd = sqrt(current$sigmaPiSq), log = TRUE)
+          
+          part1 = dnorm(log(data$NSU[,year]), mean = log(Nprev[,year]) + current$mu, sd = sqrt(data$R[,year] / (data$D[,year] * Nprev[,year] )), log = TRUE)
+          part1[is.na(part1)] = 0
+
+          part2 = rowSums(dnorm(log(data$Y[,,year]/data$phat[,,year]), mean = matrix(log(Nprev[,year]) + current$theta, nrow = numSites, ncol = numLists) +
+                                                                           matrix(current$delta, nrow = numSites, ncol = numLists ) +
+                                                                           matrix(current$gamma, nrow = numSites, ncol = numLists, byrow = TRUE),
+                                sd = sqrt(current$sigmaESq/data$n[,,year]), log = TRUE), na.rm = TRUE)
+          part2[is.na(part2)] = 0
+
+          
+          logBottomPost = part1 +
+              part2 +
+              dnorm(logit(current$pi[,year+1]), mean = logitpiprev[,year] + yearTrend[year+1], sd = sqrt(current$sigmaPiSq), log = TRUE) +
+              dnorm(logitpiprev[,year], mean = logit(pinew[,year-1]) + yearTrend[year], sd = sqrt(current$sigmaPiSq), log = TRUE)
+
+          ## Calculate Acceptance Probability
+          prob = exp( logTopPost - logBottomPost)
+
+          ## Accept/Reject
+          U = runif(length(prob))
+
+          pinew[which(U < prob),year] = piprop[which(U < prob),year]
+          pinew[which(U >= prob),year] = piprev[which(U >= prob),year]
+
+          Nnew[which(U < prob),year] = Nprop[which(U < prob)]
+          Nnew[which(U >= prob),year] = Nprev[which(U >= prob)]
+          
+      }
+      
+      ## Update Last Pi
+      year = numYears
+
+      part1 = dnorm(log(data$NSU[,year]), mean = log(Nprop[,year]) + current$mu, sd = sqrt(data$R[,year] / (data$D[,year] * Nprop[,year] )), log = TRUE)
+      part1[is.na(part1)] = 0
+
+      part2 = rowSums(dnorm(log(data$Y[,,year]/data$phat[,,year]), mean = matrix(log(Nprop[,year]) + current$theta, nrow = numSites, ncol = numLists) +
+                                                                       matrix(current$delta, nrow = numSites, ncol = numLists ) +
+                                                                       matrix(current$gamma, nrow = numSites, ncol = numLists, byrow = TRUE),
+                            sd = sqrt(current$sigmaESq/data$n[,,year]), log = TRUE), na.rm = TRUE)
+      part2[is.na(part2)] = 0
+      
+      logTopPost = part1 +
+          part2 +
+          dnorm(logitpiprop[,year], mean = logit(pinew[,year-1]) + yearTrend[year], sd = sqrt(current$sigmaPiSq), log = TRUE)
+
+      
+      part1 = dnorm(log(data$NSU[,year]), mean = log(Nprev[,year]) + current$mu, sd = sqrt(data$R[,year] / (data$D[,year] * Nprev[,year] )), log = TRUE)
+      part1[is.na(part1)] = 0
+
+      part2 = rowSums(dnorm(log(data$Y[,,year]/data$phat[,,year]), mean = matrix(log(Nprev[,year]) + current$theta, nrow = numSites, ncol = numLists) +
+                                                                       matrix(current$delta, nrow = numSites, ncol = numLists ) +
+                                                                       matrix(current$gamma, nrow = numSites, ncol = numLists, byrow = TRUE),
+                            sd = sqrt(current$sigmaESq/data$n[,,year]), log = TRUE), na.rm = TRUE)
+      part2[is.na(part2)] = 0
+
+      
+      logBottomPost = part1 +
+          part2 +
+          dnorm(logitpiprev[,year], mean = logit(pinew[,year-1]) + yearTrend[year], sd = sqrt(current$sigmaPiSq), log = TRUE)
+
+      ## Calculate Acceptance Probability
+      prob = exp(logTopPost - logBottomPost)
+
+      ## Accept/Reject
+      U = runif(length(prob))
+
+      pinew[which(U < prob),year] = piprop[which(U < prob),year]
+      pinew[which(U >= prob),year] = piprev[which(U >= prob),year]
+
+      Nnew[which(U < prob),year] = Nprop[which(U < prob),year]
+      Nnew[which(U >= prob),year] = Nprev[which(U >= prob),year]
+
+      pinew[pinew == 1] = .99
+      
+      return(pinew)
+  }
+
+
+  updateMCMC = function(current, N.MCMC, data, tune)
+  {
+      chain = makeChain(data, N.MCMC )
+      
+      for(i in 1:N.MCMC)
+      {
+          current$N = current$pi*data$R
+          ## Update p
+          for(list in 1:numLists)
+          {
+              current$p[,list,] = data$Y[,list,]/current$N
+          }
+
+          ## Update mu0
+          var =  1/( (1/10) + length(current$pi[,1])/current$sigmaSq0)
+          coef = sum(logit(current$pi[,1]) )/current$sigmaSq0
+
+          current$mu0 = rnorm(1, mean = coef*var, sd = sqrt(var))
+          chain$mu0[i] = current$mu0
+
+          ## Update sigmaSq0
+          current$sigmaSq0 = 1/rgamma(n=1, shape = 1 + length(current$pi[,1])/2 , rate = 1 + sum( (logit(current$pi[,1]) - current$mu0)^2 )/2 )
+          chain$sigmaSq0[i] = current$sigmaSq0
+
+          ## Update pi
+          current$pi = updatePiN(current, data, tune)                                                 
+          chain$pi[i,,] = current$pi
+          current$N = current$pi*data$R
+          chain$N[i,,] = current$N
+          
+          ## Update yearTrend
+          current$yearTrend = updateYearTrend(data,current )
+          chain$yearTrend[i,] = current$yearTrend
+
+          ## Update "sigmaSq.yearTrend"
+          current$"sigmaSq.yearTrend" = 1/rgamma(n=1, shape = 1 + length(current$yearTrend[-1])/2 , rate = .001 + sum ( (current$yearTrend[-1])^2 )/2 )
+          chain$sigmaSq.yearTrend[i] = current$"sigmaSq.yearTrend"
+
+          
+          ## Update sigmaPiSq       
+          current$"sigmaPiSq" = updateSigmaPiSq(current,data)
+          chain$sigmaPiSq[i] = current$"sigmaPiSq"
+          
+          
+          ## Update sigmaNSq 
+          current$"sigmaNSq" = data$R / (data$D * current$N )
+
+          ## Update p
+          for(list in 1:numLists)
+          {
+              current$p[,list,] = data$Y[,list,]/current$N
+          }
+          
+          ## Update theta          
+          current$"theta" = 0
+          chain$theta[i] = current$theta
+          print(current$theta)
+
+          ## Update mu
+          current$"mu" = 0
+          chain$mu[i] = current$mu
+
+          ## Update Gamma
+          current$"gamma" = rep(0, data$numLists )
+          chain$gamma[i,] = current$gamma
+
+          ## Update Delta
+          current$"delta" = rep(0, data$numSites)
+          chain$delta[i,] = current$delta
+
+          ## Update SigmaDeltaSq
+          current$sigmaDeltaSq = 0
+          chain$sigmaDeltaSq[i] = current$sigmaDeltaSq
+
+          ## Update SigmaSSq
+          current$sigmaSSq = 1#/rgamma(n=1, shape = 1 , rate = .001 + (current$theta^2 + current$mu^2 )/2 )
+          chain$sigmaSSq[i] = current$sigmaSSq
+
+          ## Update SigmaGammaSq
+          current$sigmaGammaSq = 0
+          chain$sigmaGammaSq[i] = current$sigmaGammaSq
+
+          ## Update SigmaEqS
+          mean = log(current$p) - current$theta - replicate(numYears,outer(current$delta, current$gamma, FUN=function(x,y) (x+y)))
+          current$sigmaESq = 1/rgamma(n=1, shape = 1 + sum(!is.na(data$phat))/2 , rate = .001 + sum ( data$n*( log(data$phat) - mean)^2 , na.rm=TRUE)/2 )
+          chain$sigmaESq[i] = current$sigmaESq
+
+      }
+
+      return(list("chain" = chain, "current" = current))
+
+  }
+
+  runMCMC = function(data, current , tune, N.MCMC, thin, burnin)
+  {
+      data$Y[is.na(data$phat)] = NA
+      data$n[is.na(data$phat)] = NA
+      
+      chain = makeChain(data, N.MCMC )
+
+      results = updateMCMC(current, burnin, data,  tune)    
+      current = results$current
+      
+      for(i in 1:N.MCMC){          
+          results = updateMCMC(current, thin, data,  tune)
+          
+          current = results$current
+          
+          chain$"mu0"[i] = current$mu0
+          chain$"sigmaSq0"[i] = current$sigmaSq0
+          chain$"pi"[i,,] = current$pi
+          chain$"sigmaPiSq"[i] = current$sigmaPiSq
+          chain$"yearTrend"[i,] = current$yearTrend
+          chain$"sigmaSq.yearTrend"[i] = current$sigmaSq.yearTrend
+          chain$"sigmaNSq"[i,,] = current$sigmaNSq
+          chain$"mu"[i] = current$mu
+          chain$"p"[i,,,] = current$p
+          chain$"theta"[i] = current$theta
+          chain$"gamma"[i,] = current$gamma
+          chain$"delta"[i,] = current$delta
+          chain$"sigmaGammaSq"[i] = current$sigmaGammaSq
+          chain$"sigmaSSq"[i] = current$sigmaSSq
+          chain$"sigmaDeltaSq"[i] = current$sigmaDeltaSq
+          chain$"sigmaESq"[i] = current$sigmaESq
+          chain$"N"[i,,] = current$N
+          
+      }
+
+      return(list("chain" = chain, "current" = current ) )
+  }
+
+
+#+END_SRC
+
+** Fit Model
+
+#+BEGIN_SRC R
+
+  rm(chain)
+  rm(chain1)
+  rm(chain2)
+  rm(chain3)
+  rm(chain4)
+  
+  results = runMCMC(data, current4 , .5, 10000, 10,1 )
+  chain.nobias = results$chain
+  current.nobias = results$current
+
+  results = runMCMC(data, current.nobias , .5, 10000, 100,1000 )
+  chain.nobias = results$chain
+  current.nobias = results$current
+
+  save.image("nobias.RDATA")
+  
+#+END_SRC
+
+** Plots
+
+#+BEGIN_SRC R
+
+
+  setEPS()
+  postscript("./plots/nbfittedvalues.eps", height = 4, width = 5.5)
+  par(mfrow=c(1,1), las = 0,mex=0.5, mai=c(0.5,0.5,0.2,0.2))
+  RateEstimates = apply(chain.nobias$pi, MARGIN = c(2,3), FUN = mean )
+
+  plot(RateEstimates[1,], type="l", ylim = c(0, .04), main = "Population prevalence estimates over time", ylab = "Rate estimate", xlab = "Year", axes=F)
+  
+  for(i in 2:25)
+  {
+      lines(RateEstimates[i,], type="l")
+  }
+  axis(1, at=1:9, labels=2007:2015)
+  axis(2)
+  dev.off()
+  
+  setEPS()
+  postscript("./plots/nbfittedvalues2.eps", height = 4, width = 5.5)
+  par(mfrow=c(1,1), las = 0,mex=0.5, mai=c(0.5,0.5,0.2,0.2))
+
+  SizeEstimates = colMeans(chain.nobias$N)
+  plot(SizeEstimates[1,], type="l", ylim = c(0, 55000), main = "Population size estimates over time", ylab = "Size estimate (in thousands)", xlab = "Year",axes=F)
+  for(i in 2:25)
+  {
+      lines(SizeEstimates[i,], type="l")
+  }
+  axis(1, at=1:9, labels=2007:2015)
+  axis(2, at=(0:11)*5000,labels = (0:11)*5)
+  dev.off()
+
+
+  mean(log(SizeEstimates[,2]) >  log(data$NSU[,2]), na.rm = TRUE)
+  
+#+END_SRC
